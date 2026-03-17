@@ -7,14 +7,11 @@ from sqlalchemy.orm import Session
 
 from .db import get_db
 from .models import WebhookSignal
-from .executor import execute_trade  # ✅ NEW
+from .executor import execute_trade
 
 app = FastAPI()
 
 
-# -----------------------------
-# REQUEST MODEL
-# -----------------------------
 class TradeEngineWebhook(BaseModel):
     event: str
     ticker: str
@@ -23,17 +20,11 @@ class TradeEngineWebhook(BaseModel):
     key: str
 
 
-# -----------------------------
-# ROOT
-# -----------------------------
 @app.get("/")
 def root():
     return {"status": "running"}
 
 
-# -----------------------------
-# DASHBOARD
-# -----------------------------
 @app.get("/dashboard", response_class=HTMLResponse)
 def dashboard(db: Session = Depends(get_db)):
     signals = db.query(WebhookSignal).order_by(WebhookSignal.id.desc()).limit(50).all()
@@ -67,47 +58,208 @@ def dashboard(db: Session = Depends(get_db)):
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Trade Engine Dashboard</title>
+        <title>Freeballin Trade Dashboard</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
         <style>
             body {{
-                font-family: Arial;
+                margin: 0;
+                font-family: Inter, Arial, sans-serif;
                 background: #0b1020;
-                color: white;
+                color: #f5f7fb;
+            }}
+            .wrap {{
+                max-width: 1200px;
+                margin: 0 auto;
+                padding: 32px 20px;
+            }}
+            .hero {{
+                background: linear-gradient(135deg, rgba(255,255,255,0.08), rgba(255,255,255,0.03));
+                border: 1px solid rgba(255,255,255,0.08);
+                border-radius: 24px;
+                padding: 24px;
+                box-shadow: 0 10px 30px rgba(0,0,0,0.25);
+                margin-bottom: 24px;
+            }}
+            .eyebrow {{
+                color: #8ea0c9;
+                font-size: 12px;
+                text-transform: uppercase;
+                letter-spacing: 0.2em;
+                margin-bottom: 8px;
+            }}
+            h1 {{
+                margin: 0 0 8px 0;
+                font-size: 32px;
+            }}
+            .sub {{
+                color: #9fb0d3;
+                font-size: 14px;
+            }}
+            .stats {{
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+                gap: 16px;
+                margin-top: 20px;
+            }}
+            .card {{
+                background: rgba(255,255,255,0.04);
+                border: 1px solid rgba(255,255,255,0.08);
+                border-radius: 20px;
+                padding: 18px;
+            }}
+            .card-label {{
+                color: #8ea0c9;
+                font-size: 12px;
+                text-transform: uppercase;
+                letter-spacing: 0.14em;
+            }}
+            .card-value {{
+                margin-top: 10px;
+                font-size: 28px;
+                font-weight: 700;
+            }}
+            .panel {{
+                background: rgba(255,255,255,0.04);
+                border: 1px solid rgba(255,255,255,0.08);
+                border-radius: 24px;
                 padding: 20px;
+                box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            }}
+            .panel-head {{
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-bottom: 16px;
+            }}
+            .panel-title {{
+                font-size: 22px;
+                font-weight: 700;
+            }}
+            .hint {{
+                color: #8ea0c9;
+                font-size: 13px;
             }}
             table {{
                 width: 100%;
                 border-collapse: collapse;
+                overflow: hidden;
             }}
             th, td {{
-                padding: 10px;
-                border-bottom: 1px solid #333;
+                text-align: left;
+                padding: 14px 12px;
+                border-bottom: 1px solid rgba(255,255,255,0.08);
+                font-size: 14px;
+            }}
+            th {{
+                color: #8ea0c9;
+                font-size: 12px;
+                text-transform: uppercase;
+                letter-spacing: 0.14em;
+            }}
+            tr:hover {{
+                background: rgba(255,255,255,0.03);
             }}
             .badge {{
-                padding: 5px 10px;
-                border-radius: 10px;
+                display: inline-block;
+                padding: 6px 10px;
+                border-radius: 999px;
+                font-size: 12px;
+                font-weight: 700;
             }}
-            .status-entry {{ background: blue; }}
-            .status-stop {{ background: red; }}
-            .status-tp {{ background: green; }}
-            .status-close {{ background: purple; }}
+            .status-entry {{
+                background: rgba(59,130,246,0.18);
+                color: #93c5fd;
+            }}
+            .status-stop {{
+                background: rgba(239,68,68,0.18);
+                color: #fca5a5;
+            }}
+            .status-tp {{
+                background: rgba(34,197,94,0.18);
+                color: #86efac;
+            }}
+            .status-close {{
+                background: rgba(168,85,247,0.18);
+                color: #d8b4fe;
+            }}
+            .status-default {{
+                background: rgba(148,163,184,0.18);
+                color: #cbd5e1;
+            }}
+            .footer-links {{
+                margin-top: 18px;
+                display: flex;
+                gap: 12px;
+                flex-wrap: wrap;
+            }}
+            .footer-links a {{
+                color: #c7d2fe;
+                text-decoration: none;
+                background: rgba(255,255,255,0.05);
+                border: 1px solid rgba(255,255,255,0.08);
+                border-radius: 999px;
+                padding: 10px 14px;
+                font-size: 13px;
+            }}
+            .empty {{
+                color: #8ea0c9;
+                padding: 22px 0 8px 0;
+            }}
         </style>
     </head>
     <body>
-        <h1>Trade Engine Dashboard</h1>
-        <p>Total Signals: {len(signals)}</p>
+        <div class="wrap">
+            <div class="hero">
+                <div class="eyebrow">Freeballin</div>
+                <h1>Trade Engine Dashboard</h1>
+                <div class="sub">Simple Python dashboard for live webhook signals.</div>
 
-        <table>
-            <tr>
-                <th>ID</th>
-                <th>Event</th>
-                <th>Ticker</th>
-                <th>Side</th>
-                <th>Qty</th>
-                <th>Time</th>
-            </tr>
-            {rows}
-        </table>
+                <div class="stats">
+                    <div class="card">
+                        <div class="card-label">Signals Logged</div>
+                        <div class="card-value">{len(signals)}</div>
+                    </div>
+                    <div class="card">
+                        <div class="card-label">Webhook</div>
+                        <div class="card-value" style="font-size:18px;">Live</div>
+                    </div>
+                    <div class="card">
+                        <div class="card-label">Endpoint</div>
+                        <div class="card-value" style="font-size:18px;">/api/webhook/trade-engine</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="panel">
+                <div class="panel-head">
+                    <div class="panel-title">Recent Signals</div>
+                    <div class="hint">Latest 50 webhook events</div>
+                </div>
+
+                {f'''
+                <table>
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>Event</th>
+                            <th>Ticker</th>
+                            <th>Side</th>
+                            <th>Qty</th>
+                            <th>Time</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {rows}
+                    </tbody>
+                </table>
+                ''' if signals else '<div class="empty">No signals yet. Trigger a TradingView alert and refresh this page.</div>'}
+
+                <div class="footer-links">
+                    <a href="/docs">API Docs</a>
+                    <a href="/api/signals">Raw Signals JSON</a>
+                </div>
+            </div>
+        </div>
     </body>
     </html>
     """
@@ -115,16 +267,11 @@ def dashboard(db: Session = Depends(get_db)):
     return HTMLResponse(content=html)
 
 
-# -----------------------------
-# WEBHOOK (MAIN ENGINE 🔥)
-# -----------------------------
 @app.post("/api/webhook/trade-engine")
 def webhook(data: TradeEngineWebhook, db: Session = Depends(get_db)):
-    # 🔐 SECURITY
     if data.key != os.getenv("USER_KEY", "trading123"):
         raise HTTPException(status_code=401, detail="Invalid webhook key")
 
-    # 💾 SAVE SIGNAL
     signal = WebhookSignal(
         event=data.event,
         ticker=data.ticker,
@@ -138,10 +285,8 @@ def webhook(data: TradeEngineWebhook, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(signal)
 
-    # ⚡ EXECUTE (NEW 🔥)
     execution_result = execute_trade(signal)
 
-    # 📤 RESPONSE
     return {
         "message": "webhook saved",
         "id": signal.id,
@@ -151,9 +296,6 @@ def webhook(data: TradeEngineWebhook, db: Session = Depends(get_db)):
     }
 
 
-# -----------------------------
-# SIGNALS API
-# -----------------------------
 @app.get("/api/signals")
 def list_signals(db: Session = Depends(get_db)):
     signals = db.query(WebhookSignal).order_by(WebhookSignal.id.desc()).limit(50).all()
