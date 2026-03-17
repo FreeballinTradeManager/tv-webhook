@@ -34,6 +34,14 @@ def dashboard(db: Session = Depends(get_db)):
         status_class = "status-default"
         event_upper = (s.event or "").upper()
 
+        execution_action = ""
+        try:
+            payload = json.loads(s.raw_payload) if s.raw_payload else {}
+            execution = payload.get("execution", {})
+            execution_action = execution.get("action", "")
+        except Exception:
+            execution_action = ""
+
         if event_upper == "ENTRY":
             status_class = "status-entry"
         elif "STOP" in event_upper:
@@ -50,6 +58,7 @@ def dashboard(db: Session = Depends(get_db)):
             <td>{s.ticker}</td>
             <td>{s.side}</td>
             <td>{s.qty}</td>
+            <td>{execution_action or "-"}</td>
             <td>{s.created_at}</td>
         </tr>
         """
@@ -245,6 +254,7 @@ def dashboard(db: Session = Depends(get_db)):
                             <th>Ticker</th>
                             <th>Side</th>
                             <th>Qty</th>
+                            <th>Execution</th>
                             <th>Time</th>
                         </tr>
                     </thead>
@@ -272,20 +282,23 @@ def webhook(data: TradeEngineWebhook, db: Session = Depends(get_db)):
     if data.key != os.getenv("USER_KEY", "trading123"):
         raise HTTPException(status_code=401, detail="Invalid webhook key")
 
+    execution_result = execute_trade(data)
+
     signal = WebhookSignal(
         event=data.event,
         ticker=data.ticker,
         side=data.side,
         qty=data.qty,
         key=data.key,
-        raw_payload=json.dumps(data.model_dump())
+        raw_payload=json.dumps({
+            "signal": data.model_dump(),
+            "execution": execution_result
+        })
     )
 
     db.add(signal)
     db.commit()
     db.refresh(signal)
-
-    execution_result = execute_trade(signal)
 
     return {
         "message": "webhook saved",
@@ -307,6 +320,7 @@ def list_signals(db: Session = Depends(get_db)):
             "side": s.side,
             "qty": s.qty,
             "created_at": s.created_at,
+            "raw_payload": s.raw_payload,
         }
         for s in signals
     ]
