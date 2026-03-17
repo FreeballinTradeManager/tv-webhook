@@ -1,3 +1,4 @@
+import os
 from fastapi import FastAPI, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -7,9 +8,14 @@ from .models import WebhookSignal
 
 app = FastAPI()
 
+
+# Create tables
 Base.metadata.create_all(bind=engine)
 
 
+# =========================
+# Models
+# =========================
 class TradeEngineWebhook(BaseModel):
     event: str
     ticker: str
@@ -18,6 +24,10 @@ class TradeEngineWebhook(BaseModel):
     key: str
 
 
+# =========================
+# Routes
+# =========================
+
 @app.get("/")
 def root():
     return {"status": "running"}
@@ -25,9 +35,11 @@ def root():
 
 @app.post("/api/webhook/trade-engine")
 def webhook(data: TradeEngineWebhook, db: Session = Depends(get_db)):
-    if data.key != "trading123":
+    # 🔐 Secure key check
+    if data.key != os.getenv("USER_KEY", "trading123"):
         raise HTTPException(status_code=401, detail="Invalid webhook key")
 
+    # Save signal
     signal = WebhookSignal(
         event=data.event,
         ticker=data.ticker,
@@ -52,6 +64,7 @@ def webhook(data: TradeEngineWebhook, db: Session = Depends(get_db)):
 @app.get("/api/signals")
 def list_signals(db: Session = Depends(get_db)):
     signals = db.query(WebhookSignal).order_by(WebhookSignal.id.desc()).limit(50).all()
+
     return [
         {
             "id": s.id,
