@@ -10,7 +10,7 @@ from .models import WebhookSignal
 
 app = FastAPI()
 
-
+from .executor import execute_trade
 class TradeEngineWebhook(BaseModel):
     event: str
     ticker: str
