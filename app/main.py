@@ -47,6 +47,8 @@ def webhook(data: TradeEngineWebhook, db: Session = Depends(get_db)):
         "event": signal.event,
         "ticker": signal.ticker
     }
+
+
 @app.get("/api/signals")
 def list_signals(db: Session = Depends(get_db)):
     signals = db.query(WebhookSignal).order_by(WebhookSignal.id.desc()).limit(50).all()
