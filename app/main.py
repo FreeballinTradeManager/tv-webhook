@@ -1,15 +1,26 @@
 import os
 import json
+from typing import Optional
+
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 
-from .db import get_db
+from .db import get_db, run_migrations
+# Import models so SQLAlchemy registers tables before run_migrations() runs.
+from . import models  # noqa: F401
 from .models import WebhookSignal
 from .executor import execute_trade
 
 app = FastAPI()
+
+
+@app.on_event("startup")
+def on_startup() -> None:
+    # Idempotent: creates table if missing, adds new columns if missing.
+    run_migrations()
 
 
 class TradeEngineWebhook(BaseModel):
@@ -18,6 +29,11 @@ class TradeEngineWebhook(BaseModel):
     side: str
     qty: int
     key: str
+
+    # Phase 1: optional duplicate-protection fields. Backward-compatible —
+    # legacy TradingView alerts that don't send these still work.
+    trade_id: Optional[str] = None
+    event_id: Optional[str] = None
 
 
 @app.get("/")
@@ -59,6 +75,8 @@ def dashboard(db: Session = Depends(get_db)):
             <td>{s.side}</td>
             <td>{s.qty}</td>
             <td>{execution_action or "-"}</td>
+            <td>{s.trade_id or "-"}</td>
+            <td>{s.event_id or "-"}</td>
             <td>{s.created_at}</td>
         </tr>
         """
@@ -255,6 +273,8 @@ def dashboard(db: Session = Depends(get_db)):
                             <th>Side</th>
                             <th>Qty</th>
                             <th>Execution</th>
+                            <th>Trade ID</th>
+                            <th>Event ID</th>
                             <th>Time</th>
                         </tr>
                     </thead>
@@ -282,6 +302,32 @@ def webhook(data: TradeEngineWebhook, db: Session = Depends(get_db)):
     if data.key != os.getenv("USER_KEY", "trading123"):
         raise HTTPException(status_code=401, detail="Invalid webhook key")
 
+    # ---- Phase 1: duplicate protection ----------------------------------
+    # If the payload carries an event_id, check whether we've already saved
+    # one with the same value. If so, do NOT execute again — just return a
+    # duplicate_ignored response that includes the original row id so the
+    # caller can reconcile.
+    #
+    # Payloads without event_id still flow through (backward-compatible) but
+    # get no dup protection. TradingView/Pine should be updated to send
+    # event_id on every event.
+    if data.event_id:
+        existing = (
+            db.query(WebhookSignal)
+            .filter(WebhookSignal.event_id == data.event_id)
+            .first()
+        )
+        if existing:
+            return {
+                "message": "duplicate ignored",
+                "status": "duplicate_ignored",
+                "id": existing.id,
+                "event_id": existing.event_id,
+                "trade_id": existing.trade_id,
+                "event": existing.event,
+                "ticker": existing.ticker,
+            }
+
     execution_result = execute_trade(data)
 
     signal = WebhookSignal(
@@ -290,6 +336,8 @@ def webhook(data: TradeEngineWebhook, db: Session = Depends(get_db)):
         side=data.side,
         qty=data.qty,
         key=data.key,
+        trade_id=data.trade_id,
+        event_id=data.event_id,
         raw_payload=json.dumps({
             "signal": data.model_dump(),
             "execution": execution_result
@@ -297,7 +345,28 @@ def webhook(data: TradeEngineWebhook, db: Session = Depends(get_db)):
     )
 
     db.add(signal)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # Race condition: two webhooks with the same event_id hit at once.
+        # The unique index on event_id rejected the second one. Treat it as
+        # a duplicate.
+        db.rollback()
+        existing = (
+            db.query(WebhookSignal)
+            .filter(WebhookSignal.event_id == data.event_id)
+            .first()
+        )
+        return {
+            "message": "duplicate ignored",
+            "status": "duplicate_ignored",
+            "id": existing.id if existing else None,
+            "event_id": data.event_id,
+            "trade_id": data.trade_id,
+            "event": data.event,
+            "ticker": data.ticker,
+        }
+
     db.refresh(signal)
 
     return {
@@ -305,7 +374,9 @@ def webhook(data: TradeEngineWebhook, db: Session = Depends(get_db)):
         "id": signal.id,
         "event": signal.event,
         "ticker": signal.ticker,
-        "execution": execution_result
+        "trade_id": signal.trade_id,
+        "event_id": signal.event_id,
+        "execution": execution_result,
     }
 
 
@@ -319,6 +390,8 @@ def list_signals(db: Session = Depends(get_db)):
             "ticker": s.ticker,
             "side": s.side,
             "qty": s.qty,
+            "trade_id": s.trade_id,
+            "event_id": s.event_id,
             "created_at": s.created_at,
             "raw_payload": s.raw_payload,
         }
