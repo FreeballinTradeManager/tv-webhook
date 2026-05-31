@@ -11,7 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from .db import get_db, run_migrations
 # Import models so SQLAlchemy registers tables before run_migrations() runs.
 from . import models  # noqa: F401
-from .models import WebhookSignal, Position
+from .models import WebhookSignal, Position, StopUpdate
 from .executor import execute_trade
 
 app = FastAPI()
@@ -39,6 +39,21 @@ class TradeEngineWebhook(BaseModel):
     entry_px: Optional[float] = None
     stop_px: Optional[float] = None
 
+    # Phase 2.5 — matches TM_Compact_20.80.pine Trade Engine payload:
+    # ENTRY snapshot
+    tp1_px: Optional[float] = None
+    tp1_qty: Optional[int] = None
+    tp2_px: Optional[float] = None
+    tp2_qty: Optional[int] = None
+    tp3_px: Optional[float] = None
+    tp3_qty: Optional[int] = None
+    runner_qty: Optional[int] = None
+    # Sent on TP1/TP2/TP3/CLOSE50/STOP_HIT/EMA_EXIT/MASTER_CLOSE
+    close_qty: Optional[int] = None
+    remaining_qty: Optional[int] = None
+    # Sent on ENTRY + STOP_UPDATE — Pine's stop_src (BASE / BE / JUMP / TRAIL / RESYNC / MASTER)
+    source: Optional[str] = None
+
 
 @app.get("/")
 def root():
@@ -59,6 +74,13 @@ def dashboard(db: Session = Depends(get_db)):
         .filter(Position.status.in_(["CLOSED", "CANCELLED"]))
         .order_by(Position.updated_at.desc())
         .limit(25)
+        .all()
+    )
+    # Phase 2.5: real-time stop-update ledger — latest 50 across all trades.
+    recent_stop_updates = (
+        db.query(StopUpdate)
+        .order_by(StopUpdate.id.desc())
+        .limit(50)
         .all()
     )
 
@@ -130,6 +152,7 @@ def dashboard(db: Session = Depends(get_db)):
             <td>{p.qty_open}/{p.qty_total}</td>
             <td>{p.entry_price if p.entry_price is not None else "-"}</td>
             <td>{p.stop_price if p.stop_price is not None else "-"}</td>
+            <td>{p.stop_source or "-"}</td>
             <td>{p.exit_reason or "-"}</td>
             <td>{p.updated_at}</td>
         </tr>
@@ -137,6 +160,28 @@ def dashboard(db: Session = Depends(get_db)):
 
     active_rows = "".join(_pos_row(p) for p in active_positions)
     closed_rows = "".join(_pos_row(p) for p in closed_positions)
+
+    # --- Stop update ledger rows --------------------------------------------
+    def _stop_row(s: StopUpdate) -> str:
+        old_disp = f"{s.old_stop}" if s.old_stop is not None else "—"
+        delta = ""
+        if s.old_stop is not None and s.new_stop is not None:
+            d = s.new_stop - s.old_stop
+            sign = "+" if d > 0 else ""
+            delta = f"<span class='hint'>({sign}{d:.2f})</span>"
+        return f"""
+        <tr>
+            <td>{s.id}</td>
+            <td>{s.created_at}</td>
+            <td>{s.trade_id}</td>
+            <td>{s.ticker}</td>
+            <td>{s.side}</td>
+            <td>{old_disp}</td>
+            <td><strong>{s.new_stop}</strong> {delta}</td>
+            <td><span class="badge status-stop">{s.source or "—"}</span></td>
+        </tr>
+        """
+    stop_rows = "".join(_stop_row(s) for s in recent_stop_updates)
 
     html = f"""
     <!DOCTYPE html>
@@ -306,6 +351,7 @@ def dashboard(db: Session = Depends(get_db)):
                             <th>Qty Open</th>
                             <th>Entry</th>
                             <th>Stop</th>
+                            <th>Stop Source</th>
                             <th>Exit Reason</th>
                             <th>Updated</th>
                         </tr>
@@ -332,6 +378,7 @@ def dashboard(db: Session = Depends(get_db)):
                             <th>Qty Open</th>
                             <th>Entry</th>
                             <th>Stop</th>
+                            <th>Stop Source</th>
                             <th>Exit Reason</th>
                             <th>Updated</th>
                         </tr>
@@ -339,6 +386,30 @@ def dashboard(db: Session = Depends(get_db)):
                     <tbody>{closed_rows}</tbody>
                 </table>
                 ''' if closed_positions else '<div class="empty">No closed positions yet.</div>'}
+            </div>
+
+            <div class="panel">
+                <div class="panel-head">
+                    <div class="panel-title">Stop Updates</div>
+                    <div class="hint">Real-time ledger — BE · JUMP · TRAIL · RESYNC · MASTER · drag · last 50</div>
+                </div>
+                {f'''
+                <table>
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>Time</th>
+                            <th>Trade ID</th>
+                            <th>Ticker</th>
+                            <th>Side</th>
+                            <th>Old Stop</th>
+                            <th>New Stop</th>
+                            <th>Source</th>
+                        </tr>
+                    </thead>
+                    <tbody>{stop_rows}</tbody>
+                </table>
+                ''' if recent_stop_updates else '<div class="empty">No stop updates yet.</div>'}
             </div>
 
             <div class="panel">
@@ -371,6 +442,7 @@ def dashboard(db: Session = Depends(get_db)):
                     <a href="/docs">API Docs</a>
                     <a href="/api/signals">Raw Signals JSON</a>
                     <a href="/api/positions">Positions JSON</a>
+                    <a href="/api/stop-updates">Stop Updates JSON</a>
                 </div>
             </div>
         </div>
@@ -490,9 +562,30 @@ def _position_to_dict(p: Position) -> dict:
         "qty_total": p.qty_total,
         "entry_price": p.entry_price,
         "stop_price": p.stop_price,
+        "stop_source": p.stop_source,
         "exit_reason": p.exit_reason,
+        "tp1_px": p.tp1_px,
+        "tp1_qty": p.tp1_qty,
+        "tp2_px": p.tp2_px,
+        "tp2_qty": p.tp2_qty,
+        "tp3_px": p.tp3_px,
+        "tp3_qty": p.tp3_qty,
+        "runner_qty": p.runner_qty,
         "created_at": p.created_at,
         "updated_at": p.updated_at,
+    }
+
+
+def _stop_update_to_dict(s: StopUpdate) -> dict:
+    return {
+        "id": s.id,
+        "trade_id": s.trade_id,
+        "ticker": s.ticker,
+        "side": s.side,
+        "old_stop": s.old_stop,
+        "new_stop": s.new_stop,
+        "source": s.source,
+        "created_at": s.created_at,
     }
 
 
@@ -521,3 +614,25 @@ def get_position(trade_id: str, db: Session = Depends(get_db)):
     if not p:
         raise HTTPException(status_code=404, detail="position not found")
     return _position_to_dict(p)
+
+
+@app.get("/api/stop-updates")
+def list_stop_updates(db: Session = Depends(get_db), trade_id: Optional[str] = None):
+    """Real-time ledger of every STOP_UPDATE — BE / JUMP / TRAIL / RESYNC / MASTER / drag.
+    Optional ?trade_id= to filter to one trade."""
+    q = db.query(StopUpdate)
+    if trade_id:
+        q = q.filter(StopUpdate.trade_id == trade_id)
+    rows = q.order_by(StopUpdate.id.desc()).limit(200).all()
+    return [_stop_update_to_dict(r) for r in rows]
+
+
+@app.get("/api/stop-updates/{trade_id}")
+def list_stop_updates_for_trade(trade_id: str, db: Session = Depends(get_db)):
+    rows = (
+        db.query(StopUpdate)
+        .filter(StopUpdate.trade_id == trade_id)
+        .order_by(StopUpdate.id.asc())  # chronological for per-trade view
+        .all()
+    )
+    return [_stop_update_to_dict(r) for r in rows]

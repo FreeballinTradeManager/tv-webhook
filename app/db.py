@@ -37,11 +37,22 @@ def get_db():
 # When adding a new column or index, append another statement here.
 # ---------------------------------------------------------------------------
 MIGRATIONS = [
-    # Phase 1: duplicate protection columns
+    # Phase 1: duplicate protection columns on webhook_signals
     "ALTER TABLE webhook_signals ADD COLUMN IF NOT EXISTS trade_id TEXT",
     "ALTER TABLE webhook_signals ADD COLUMN IF NOT EXISTS event_id TEXT",
     "CREATE INDEX IF NOT EXISTS ix_webhook_signals_trade_id ON webhook_signals (trade_id)",
     "CREATE UNIQUE INDEX IF NOT EXISTS ix_webhook_signals_event_id ON webhook_signals (event_id)",
+
+    # Phase 2.5: ENTRY snapshot + stop source on positions.
+    # (positions table itself is created by Base.metadata.create_all in Phase 2.)
+    "ALTER TABLE positions ADD COLUMN IF NOT EXISTS tp1_px DOUBLE PRECISION",
+    "ALTER TABLE positions ADD COLUMN IF NOT EXISTS tp1_qty INTEGER",
+    "ALTER TABLE positions ADD COLUMN IF NOT EXISTS tp2_px DOUBLE PRECISION",
+    "ALTER TABLE positions ADD COLUMN IF NOT EXISTS tp2_qty INTEGER",
+    "ALTER TABLE positions ADD COLUMN IF NOT EXISTS tp3_px DOUBLE PRECISION",
+    "ALTER TABLE positions ADD COLUMN IF NOT EXISTS tp3_qty INTEGER",
+    "ALTER TABLE positions ADD COLUMN IF NOT EXISTS runner_qty INTEGER",
+    "ALTER TABLE positions ADD COLUMN IF NOT EXISTS stop_source TEXT",
 ]
 
 
