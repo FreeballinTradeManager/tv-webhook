@@ -72,11 +72,20 @@ def dashboard(db: Session = Depends(get_db)):
         execution_status = ""
         position_status_after = ""
         try:
-            payload = json.loads(s.raw_payload) if s.raw_payload else {}
-            execution = payload.get("execution", {})
-            execution_action = execution.get("action", "")
-            execution_status = execution.get("status", "")
-            position_status_after = execution.get("position_status", "")
+            # raw_payload may be a JSON string (Text column) or already a
+            # dict (JSONB column). Handle both — the column type drifted
+            # at some point in the project history.
+            rp = s.raw_payload
+            if isinstance(rp, str):
+                payload = json.loads(rp) if rp else {}
+            elif isinstance(rp, dict):
+                payload = rp
+            else:
+                payload = {}
+            execution = payload.get("execution", {}) or {}
+            execution_action = execution.get("action", "") or ""
+            execution_status = execution.get("status", "") or ""
+            position_status_after = execution.get("position_status", "") or ""
         except Exception:
             pass
 
