@@ -2,7 +2,7 @@ import os
 import json
 from typing import Optional
 
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -13,6 +13,8 @@ from .db import get_db, run_migrations
 from . import models  # noqa: F401
 from .models import WebhookSignal, Position, StopUpdate
 from .executor import execute_trade
+from .ws import manager as ws_manager
+from .assets import locked_pnl, point_value
 
 app = FastAPI()
 
@@ -21,6 +23,25 @@ app = FastAPI()
 def on_startup() -> None:
     # Idempotent: creates tables if missing, adds new columns if missing.
     run_migrations()
+
+
+@app.websocket("/ws/live")
+async def ws_live(websocket: WebSocket) -> None:
+    """Dashboards open one of these and we push a 'state_changed' event
+    whenever a webhook commits. The client re-fetches /api/positions and
+    /api/stop-updates to refresh — no full-page reload, no polling."""
+    await ws_manager.connect(websocket)
+    try:
+        # Send an initial hello so the client knows the connection is live.
+        await websocket.send_json({"type": "hello", "version": "phase-3a"})
+        while True:
+            # We don't expect client messages yet, but consuming keeps the
+            # connection alive and lets us detect close cleanly.
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await ws_manager.disconnect(websocket)
 
 
 class TradeEngineWebhook(BaseModel):
@@ -142,6 +163,12 @@ def dashboard(db: Session = Depends(get_db)):
     # --- Active position rows -----------------------------------------------
     def _pos_row(p: Position) -> str:
         side_class = "side-long" if (p.side or "").upper() == "LONG" else "side-short"
+        pnl = locked_pnl(p.side, p.qty_open, p.entry_price, p.stop_price, p.ticker)
+        if pnl is None:
+            pnl_html = "-"
+        else:
+            pnl_class = "pnl-pos" if pnl >= 0 else "pnl-neg"
+            pnl_html = f'<span class="{pnl_class}">${pnl:,.2f}</span>'
         return f"""
         <tr>
             <td>{p.id}</td>
@@ -153,6 +180,7 @@ def dashboard(db: Session = Depends(get_db)):
             <td>{p.entry_price if p.entry_price is not None else "-"}</td>
             <td>{p.stop_price if p.stop_price is not None else "-"}</td>
             <td>{p.stop_source or "-"}</td>
+            <td>{pnl_html}</td>
             <td>{p.exit_reason or "-"}</td>
             <td>{p.updated_at}</td>
         </tr>
@@ -294,6 +322,24 @@ def dashboard(db: Session = Depends(get_db)):
             .status-cancelled{{ background: rgba(239,68,68,0.18); color: #fca5a5; }}
             .side-long   {{ background: rgba(34,197,94,0.18);  color: #86efac; }}
             .side-short  {{ background: rgba(239,68,68,0.18);  color: #fca5a5; }}
+            .pnl-pos     {{ color: #86efac; font-weight: 700; }}
+            .pnl-neg     {{ color: #fca5a5; font-weight: 700; }}
+            .live-dot {{
+                display: inline-block;
+                width: 8px; height: 8px;
+                border-radius: 50%;
+                background: #86efac;
+                margin-right: 6px;
+                vertical-align: middle;
+                box-shadow: 0 0 0 0 rgba(134,239,172,0.7);
+                animation: live-pulse 1.6s infinite;
+            }}
+            .live-dot.dead {{ background: #fca5a5; animation: none; }}
+            @keyframes live-pulse {{
+                0%   {{ box-shadow: 0 0 0 0 rgba(134,239,172,0.7); }}
+                70%  {{ box-shadow: 0 0 0 10px rgba(134,239,172,0); }}
+                100% {{ box-shadow: 0 0 0 0 rgba(134,239,172,0); }}
+            }}
             .footer-links {{ margin-top: 18px; display: flex; gap: 12px; flex-wrap: wrap; }}
             .footer-links a {{
                 color: #c7d2fe;
@@ -312,7 +358,7 @@ def dashboard(db: Session = Depends(get_db)):
             <div class="hero">
                 <div class="eyebrow">Freeballin</div>
                 <h1>Trade Engine Dashboard</h1>
-                <div class="sub">Stateful webhook engine — Phase 2 (positions + state machine).</div>
+                <div class="sub"><span id="live-dot" class="live-dot"></span><span id="live-text">Live — auto-updating</span> · stateful webhook engine, Phase 3a</div>
 
                 <div class="stats">
                     <div class="card">
@@ -352,6 +398,7 @@ def dashboard(db: Session = Depends(get_db)):
                             <th>Entry</th>
                             <th>Stop</th>
                             <th>Stop Source</th>
+                            <th>Locked PnL</th>
                             <th>Exit Reason</th>
                             <th>Updated</th>
                         </tr>
@@ -379,6 +426,7 @@ def dashboard(db: Session = Depends(get_db)):
                             <th>Entry</th>
                             <th>Stop</th>
                             <th>Stop Source</th>
+                            <th>Locked PnL</th>
                             <th>Exit Reason</th>
                             <th>Updated</th>
                         </tr>
@@ -446,6 +494,55 @@ def dashboard(db: Session = Depends(get_db)):
                 </div>
             </div>
         </div>
+
+        <script>
+        // ─── Live update layer ─────────────────────────────────────────────
+        // Opens a WebSocket to /ws/live. On every "state_changed" event the
+        // server pushes (after each webhook commit), we softly reload the
+        // page. Using full reload keeps the JS tiny and guarantees every
+        // panel reflects the latest server state — no client-side cache
+        // to drift.
+        //
+        // The live dot in the header turns red if the WS drops; we also
+        // auto-reconnect with backoff.
+        (function () {{
+            const proto = location.protocol === "https:" ? "wss:" : "ws:";
+            const url   = proto + "//" + location.host + "/ws/live";
+            let backoff = 500, reloadTimer = null;
+            const dot   = document.getElementById("live-dot");
+            const text  = document.getElementById("live-text");
+
+            function markDead(msg) {{
+                if (dot)  dot.classList.add("dead");
+                if (text) text.textContent = msg;
+            }}
+            function markLive() {{
+                if (dot)  dot.classList.remove("dead");
+                if (text) text.textContent = "Live — auto-updating";
+            }}
+
+            function connect() {{
+                const ws = new WebSocket(url);
+                ws.onopen = () => {{ backoff = 500; markLive(); }};
+                ws.onmessage = (ev) => {{
+                    let msg;
+                    try {{ msg = JSON.parse(ev.data); }} catch (_) {{ return; }}
+                    if (msg.type === "state_changed") {{
+                        // Debounce — burst webhooks reload only once.
+                        if (reloadTimer) clearTimeout(reloadTimer);
+                        reloadTimer = setTimeout(() => location.reload(), 250);
+                    }}
+                }};
+                ws.onclose = () => {{
+                    markDead("Reconnecting…");
+                    setTimeout(connect, backoff);
+                    backoff = Math.min(backoff * 2, 8000);
+                }};
+                ws.onerror = () => {{ try {{ ws.close(); }} catch (_) {{}} }};
+            }}
+            connect();
+        }})();
+        </script>
     </body>
     </html>
     """
@@ -521,6 +618,22 @@ def webhook(data: TradeEngineWebhook, db: Session = Depends(get_db)):
 
     db.refresh(signal)
 
+    # Push a notification to every connected dashboard so they re-fetch
+    # without manual reload. Payload kept small on purpose — clients pull
+    # the canonical state from /api/* so we don't have to keep two
+    # serializers in sync.
+    ws_manager.broadcast_threadsafe({
+        "type": "state_changed",
+        "trigger": {
+            "event": signal.event,
+            "ticker": signal.ticker,
+            "trade_id": signal.trade_id,
+            "event_id": signal.event_id,
+            "position_status": execution_result.get("position_status"),
+            "action": execution_result.get("action"),
+        },
+    })
+
     return {
         "message": "webhook saved",
         "id": signal.id,
@@ -571,6 +684,11 @@ def _position_to_dict(p: Position) -> dict:
         "tp3_px": p.tp3_px,
         "tp3_qty": p.tp3_qty,
         "runner_qty": p.runner_qty,
+        # Locked PnL = the if-stop-hits-now value on currently-open qty.
+        # Positive when the stop has moved past entry (BE/jump/trail).
+        # Negative = remaining risk.
+        "locked_pnl": locked_pnl(p.side, p.qty_open, p.entry_price, p.stop_price, p.ticker),
+        "point_value": point_value(p.ticker),
         "created_at": p.created_at,
         "updated_at": p.updated_at,
     }
