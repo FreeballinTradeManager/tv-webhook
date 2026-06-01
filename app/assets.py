@@ -75,3 +75,20 @@ def locked_pnl(side: str | None, qty_open: int | None,
         return None
     sign = 1.0 if side.upper() == "LONG" else -1.0
     return round((stop_price - entry_price) * sign * qty_open * pv, 2)
+
+
+def live_pnl(side: str | None, qty_open: int | None,
+             entry_price: float | None, last_price: float | None,
+             ticker: str | None) -> float | None:
+    """Unrealized PnL at the current market price.
+
+    Same shape as locked_pnl but uses last/mid price from the MD feed.
+    Returns None when we have no quote (broker offline / not subscribed).
+    """
+    if not all([side, qty_open, entry_price is not None, last_price is not None]):
+        return None
+    pv = point_value(ticker)
+    if pv is None:
+        return None
+    sign = 1.0 if side.upper() == "LONG" else -1.0
+    return round((last_price - entry_price) * sign * qty_open * pv, 2)

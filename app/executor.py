@@ -1,22 +1,25 @@
 """
-Phase 2.5 executor — stateful, with stop ledger and real-time stop tracking.
+Phase 5b executor — stateful + broker-delegated.
 
-Reads v20.80 Trade Engine payloads. v20.80 always sends `qty` = total
-entry contracts; partial closes carry `close_qty` (TP qty / half qty).
-We use `close_qty` when present, fall back to `qty` for legacy payloads.
+State machine + validation lives here. Every side-effect (placing
+orders, modifying stops, closing positions) goes through the
+BrokerAdapter returned by `get_broker()`.
 
-STOP_UPDATE writes both the new stop AND a StopUpdate ledger row so we
-keep a real-time history of every BE / jump / trail / drag / resync.
+When no broker credentials are configured the SimulatedAdapter is used
+and behavior matches the previous phase (Position state still
+advances, no real orders sent). When TRADOVATE_USERNAME/PASSWORD/CID/
+SECRET are present, TradovateAdapter is used automatically.
 
-Events (all from TM_Compact_20.80.pine lines 1286–1356):
-    ENTRY          create position, snapshot TPs + runner
-    STOP_UPDATE    update position.stop_price + log to stop_updates
-    TP1/TP2/TP3    reduce qty_open by close_qty
-    CLOSE50        reduce qty_open by close_qty
-    STOP_HIT       close (exit_reason=stop_hit)
-    EMA_EXIT       close (exit_reason=ema_exit)
-    MASTER_CLOSE   close (exit_reason=master_close)
-    CLOSE_FALLBACK close (exit_reason=close_fallback)
+Events (TM_Compact_20.80.pine Trade Engine block):
+    ENTRY          create Position(OPEN) + broker.open_position
+    STOP_UPDATE    update Position.stop + log to stop_updates +
+                   broker.modify_stop
+    TP1/TP2/TP3    reduce qty_open by close_qty + broker.close_partial
+    CLOSE50        reduce qty_open by close_qty + broker.close_partial
+    STOP_HIT       close + broker.close_position + cancel stop
+    EMA_EXIT       close + broker.close_position
+    MASTER_CLOSE   close + broker.close_position
+    CLOSE_FALLBACK close + broker.close_position
     TEST           backward-compat ping
 """
 
@@ -26,6 +29,8 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from .brokers import get_broker
+from .brokers.base import BrokerResult
 from .models import Position, StopUpdate
 
 
@@ -63,7 +68,7 @@ def _reject(reason: str, signal, position: Position | None = None) -> dict[str, 
 
 def _ok(action: str, signal, position: Position, **extra) -> dict[str, Any]:
     return {
-        "status": "executed_sim",
+        "status": "executed_sim" if (position.broker or "simulated") == "simulated" else "executed",
         "action": action,
         "ticker": signal.ticker,
         "side": signal.side,
@@ -74,18 +79,37 @@ def _ok(action: str, signal, position: Position, **extra) -> dict[str, Any]:
         "qty_total": position.qty_total,
         "stop_price": position.stop_price,
         "stop_source": position.stop_source,
+        "broker": position.broker,
+        "broker_order_id": position.broker_order_id,
+        "broker_stop_order_id": position.broker_stop_order_id,
+        "avg_fill_price": position.avg_fill_price,
+        "broker_error": position.broker_error,
         "timestamp": _now_iso(),
         **extra,
     }
 
 
 def _close_qty(signal) -> int:
-    """Pine v20.80 sends qty=total + close_qty=partial.
-    Fall back to qty for legacy/manual payloads with no close_qty."""
     cq = getattr(signal, "close_qty", None)
     if cq is not None and cq > 0:
         return int(cq)
     return int(signal.qty)
+
+
+def _apply_broker_result(position: Position, result: BrokerResult, *, persist_ids: bool = True) -> None:
+    """Persist broker IDs / fill price / error onto the Position row."""
+    if not result.success:
+        position.broker_error = result.message or "broker call failed"
+        return
+    # Successful call clears any prior error message.
+    position.broker_error = None
+    if persist_ids:
+        if result.order_id and not position.broker_order_id:
+            position.broker_order_id = result.order_id
+        if result.stop_order_id:
+            position.broker_stop_order_id = result.stop_order_id
+        if result.fill_price is not None and position.avg_fill_price is None:
+            position.avg_fill_price = result.fill_price
 
 
 _CLOSE_EVENTS = {"MASTER_CLOSE", "CLOSE_FALLBACK", "EMA_EXIT", "STOP_HIT"}
@@ -102,6 +126,9 @@ def execute_trade(signal, db: Session | None = None) -> dict[str, Any]:
     if not trade_id or db is None:
         return _legacy_execute(signal, event)
 
+    broker = get_broker()
+    broker_name = f"{broker.name}-{broker.env}" if broker.env not in ("sim", "unknown") else broker.name
+
     position = (
         db.query(Position).filter(Position.trade_id == trade_id).first()
     )
@@ -109,7 +136,6 @@ def execute_trade(signal, db: Session | None = None) -> dict[str, Any]:
     # ---- ENTRY -----------------------------------------------------------
     if event == "ENTRY":
         if position is None:
-            # Fresh ENTRY — snapshot everything Pine sent us.
             position = Position(
                 trade_id=trade_id,
                 ticker=signal.ticker,
@@ -127,14 +153,24 @@ def execute_trade(signal, db: Session | None = None) -> dict[str, Any]:
                 runner_qty=getattr(signal, "runner_qty", None),
                 stop_source="BASE",
                 status="OPEN",
+                broker=broker_name,
             )
             db.add(position)
             db.flush()
+
+            # Side-effect: place real entry + stop at the broker.
+            result = broker.open_position(
+                ticker=signal.ticker,
+                side=signal.side,
+                qty=signal.qty,
+                stop_px=getattr(signal, "stop_px", None),
+                entry_px_hint=getattr(signal, "entry_px", None),
+            )
+            _apply_broker_result(position, result)
             return _ok("placed_order", signal, position)
 
         if position.status in _ACTIVE:
             return _reject("entry_already_open", signal, position)
-
         return _reject("trade_already_closed", signal, position)
 
     # ---- Everything else needs an existing position ----------------------
@@ -155,8 +191,6 @@ def execute_trade(signal, db: Session | None = None) -> dict[str, Any]:
         position.stop_price = new_stop
         position.stop_source = source
 
-        # Append to ledger — gives us a real-time history of every stop
-        # move (BE / JUMP / TRAIL / RESYNC / MASTER / drag).
         db.add(StopUpdate(
             trade_id=trade_id,
             ticker=signal.ticker,
@@ -165,11 +199,30 @@ def execute_trade(signal, db: Session | None = None) -> dict[str, Any]:
             new_stop=new_stop,
             source=source,
         ))
+
+        # Side-effect: actually move the stop order at the broker.
+        result = broker.modify_stop(
+            broker_stop_order_id=position.broker_stop_order_id,
+            new_stop_px=new_stop,
+            ticker=signal.ticker,
+            side=signal.side,
+            qty_open=position.qty_open,
+        )
+        _apply_broker_result(position, result)
         return _ok("updated_stop", signal, position, old_stop=old_stop, new_stop=new_stop)
 
     # ---- TP1 / TP2 / TP3 -------------------------------------------------
     if event in _TP_EVENTS:
         reduce_by = min(_close_qty(signal), position.qty_open)
+        # Broker side: opposite-side market for reduce_by.
+        result = broker.close_partial(
+            ticker=signal.ticker,
+            side=signal.side,
+            close_qty=reduce_by,
+            entry_px_hint=position.entry_price,
+        )
+        _apply_broker_result(position, result, persist_ids=False)
+
         position.qty_open -= reduce_by
         if position.qty_open <= 0:
             position.qty_open = 0
@@ -181,13 +234,20 @@ def execute_trade(signal, db: Session | None = None) -> dict[str, Any]:
 
     # ---- CLOSE50 ---------------------------------------------------------
     if event == "CLOSE50":
-        # v20.80 sends close_qty = half_qty already computed. Honor it.
-        # If close_qty missing, fall back to ceil(qty_open / 2).
         cq = getattr(signal, "close_qty", None)
         if cq is not None and cq > 0:
             reduce_by = min(int(cq), position.qty_open)
         else:
             reduce_by = ceil(position.qty_open / 2)
+
+        result = broker.close_partial(
+            ticker=signal.ticker,
+            side=signal.side,
+            close_qty=reduce_by,
+            entry_px_hint=position.entry_price,
+        )
+        _apply_broker_result(position, result, persist_ids=False)
+
         position.qty_open -= reduce_by
         if position.qty_open <= 0:
             position.qty_open = 0
@@ -199,6 +259,16 @@ def execute_trade(signal, db: Session | None = None) -> dict[str, Any]:
 
     # ---- Master closes ---------------------------------------------------
     if event in _CLOSE_EVENTS:
+        prev_open = position.qty_open
+        result = broker.close_position(
+            ticker=signal.ticker,
+            side=signal.side,
+            qty_open=prev_open,
+            broker_stop_order_id=position.broker_stop_order_id,
+            broker_order_id=position.broker_order_id,
+        )
+        _apply_broker_result(position, result, persist_ids=False)
+
         position.qty_open = 0
         position.status = "CLOSED"
         position.exit_reason = event.lower()

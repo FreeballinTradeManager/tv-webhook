@@ -53,6 +53,15 @@ MIGRATIONS = [
     "ALTER TABLE positions ADD COLUMN IF NOT EXISTS tp3_qty INTEGER",
     "ALTER TABLE positions ADD COLUMN IF NOT EXISTS runner_qty INTEGER",
     "ALTER TABLE positions ADD COLUMN IF NOT EXISTS stop_source TEXT",
+
+    # Phase 5b: broker integration columns.
+    "ALTER TABLE positions ADD COLUMN IF NOT EXISTS broker TEXT",
+    "ALTER TABLE positions ADD COLUMN IF NOT EXISTS broker_order_id TEXT",
+    "ALTER TABLE positions ADD COLUMN IF NOT EXISTS broker_stop_order_id TEXT",
+    "ALTER TABLE positions ADD COLUMN IF NOT EXISTS avg_fill_price DOUBLE PRECISION",
+    "ALTER TABLE positions ADD COLUMN IF NOT EXISTS realized_pnl DOUBLE PRECISION",
+    "ALTER TABLE positions ADD COLUMN IF NOT EXISTS broker_error TEXT",
+    "CREATE INDEX IF NOT EXISTS ix_positions_broker ON positions (broker)",
 ]
 
 

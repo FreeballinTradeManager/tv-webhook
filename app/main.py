@@ -14,15 +14,70 @@ from . import models  # noqa: F401
 from .models import WebhookSignal, Position, StopUpdate
 from .executor import execute_trade
 from .ws import manager as ws_manager
-from .assets import locked_pnl, point_value
+from .assets import locked_pnl, live_pnl, point_value, asset_root
+from .quote_store import store as quote_store
+from .brokers import get_broker
+from .db import SessionLocal
+from .reconciliation import reconcile_loop, recent_warnings
+
+import asyncio
+import logging
+
+log = logging.getLogger("tv-webhook.main")
 
 app = FastAPI()
 
 
 @app.on_event("startup")
-def on_startup() -> None:
+async def on_startup() -> None:
     # Idempotent: creates tables if missing, adds new columns if missing.
     run_migrations()
+
+    # If we have a real broker (Tradovate), kick off the MD WebSocket
+    # subscription + the reconciliation loop as background tasks.
+    broker = get_broker()
+    if broker.name == "tradovate":
+        # Build the subscribed-tickers set lazily — it's mutated as
+        # positions open/close. We pre-populate from any currently OPEN
+        # positions so a restart doesn't drop the MD feed.
+        subscribed: set[str] = set()
+        with SessionLocal() as db:
+            for p in db.query(Position).filter(Position.status.in_(["OPEN", "PARTIAL"])).all():
+                root = asset_root(p.ticker)
+                if root:
+                    subscribed.add(root)
+
+        # The webhook handler appends to this set whenever a new
+        # position is opened — see _track_for_md() below.
+        app.state.md_subscribed_tickers = subscribed
+
+        from .brokers.tradovate_md import md_ws_loop
+        asyncio.create_task(md_ws_loop(
+            client=broker.client,
+            quote_store=quote_store,
+            ws_manager=ws_manager,
+            subscribed_tickers=subscribed,
+        ))
+        asyncio.create_task(reconcile_loop(
+            broker=broker, session_factory=SessionLocal,
+        ))
+        log.info("background tasks started: md_ws_loop + reconcile_loop")
+    else:
+        app.state.md_subscribed_tickers = set()
+        log.info("broker=%s (no MD task)", broker.name)
+
+
+def _track_for_md(ticker: str | None) -> None:
+    """Called from the webhook handler when a new position opens, so the
+    MD task picks up the symbol for subscription on its next sweep."""
+    if not ticker:
+        return
+    root = asset_root(ticker)
+    if not root:
+        return
+    s = getattr(app.state, "md_subscribed_tickers", None)
+    if s is not None:
+        s.add(root)
 
 
 @app.websocket("/ws/live")
@@ -79,6 +134,31 @@ class TradeEngineWebhook(BaseModel):
 @app.get("/")
 def root():
     return {"status": "running"}
+
+
+@app.get("/api/warnings")
+def list_warnings():
+    """Recent reconciliation warnings (broker-vs-server drift)."""
+    return list(recent_warnings)
+
+
+@app.get("/api/broker-status")
+def broker_status():
+    """Which adapter is active and (when Tradovate) whether auth works.
+    Used by the dashboard hero card + as a quick ops check."""
+    b = get_broker()
+    info = {
+        "broker": b.name,
+        "env": b.env,
+    }
+    # If the adapter exposes a richer health check, surface it.
+    client = getattr(b, "client", None)
+    if client is not None and hasattr(client, "get_account_health"):
+        try:
+            info.update(client.get_account_health())
+        except Exception as e:
+            info["error"] = str(e)
+    return info
 
 
 @app.get("/dashboard", response_class=HTMLResponse)
@@ -161,18 +241,24 @@ def dashboard(db: Session = Depends(get_db)):
         """
 
     # --- Active position rows -----------------------------------------------
+    def _pnl_html(value, css_classes: str) -> str:
+        if value is None:
+            return "—"
+        cls = "pnl-pos" if value >= 0 else "pnl-neg"
+        return f'<span class="{cls} {css_classes}">${value:,.2f}</span>'
+
     def _pos_row(p: Position) -> str:
         side_class = "side-long" if (p.side or "").upper() == "LONG" else "side-short"
-        pnl = locked_pnl(p.side, p.qty_open, p.entry_price, p.stop_price, p.ticker)
-        if pnl is None:
-            pnl_html = "-"
-        else:
-            pnl_class = "pnl-pos" if pnl >= 0 else "pnl-neg"
-            pnl_html = f'<span class="{pnl_class}">${pnl:,.2f}</span>'
+        locked = locked_pnl(p.side, p.qty_open, p.entry_price, p.stop_price, p.ticker)
+        last = quote_store.last_price(p.ticker)
+        live = live_pnl(p.side, p.qty_open, p.entry_price, last, p.ticker)
+        broker_badge = ""
+        if p.broker_error:
+            broker_badge = f' <span class="badge status-stop" title="{p.broker_error}">!</span>'
         return f"""
-        <tr>
+        <tr data-trade-id="{p.trade_id}" data-ticker="{p.ticker}" data-entry="{p.entry_price or ''}" data-side="{p.side}" data-qty-open="{p.qty_open}">
             <td>{p.id}</td>
-            <td>{p.trade_id}</td>
+            <td>{p.trade_id}{broker_badge}</td>
             <td>{p.ticker}</td>
             <td><span class="badge {side_class}">{p.side}</span></td>
             <td><span class="badge status-{p.status.lower()}">{p.status}</span></td>
@@ -180,7 +266,8 @@ def dashboard(db: Session = Depends(get_db)):
             <td>{p.entry_price if p.entry_price is not None else "-"}</td>
             <td>{p.stop_price if p.stop_price is not None else "-"}</td>
             <td>{p.stop_source or "-"}</td>
-            <td>{pnl_html}</td>
+            <td>{_pnl_html(locked, '')}</td>
+            <td class="live-pnl-cell">{_pnl_html(live, '')}</td>
             <td>{p.exit_reason or "-"}</td>
             <td>{p.updated_at}</td>
         </tr>
@@ -374,8 +461,8 @@ def dashboard(db: Session = Depends(get_db)):
                         <div class="card-value">{len(closed_positions)}</div>
                     </div>
                     <div class="card">
-                        <div class="card-label">Endpoint</div>
-                        <div class="card-value" style="font-size:16px;">/api/webhook/trade-engine</div>
+                        <div class="card-label">Broker</div>
+                        <div class="card-value" style="font-size:18px;">{get_broker().name.title()} · <span style="opacity:.7">{get_broker().env}</span></div>
                     </div>
                 </div>
             </div>
@@ -399,6 +486,7 @@ def dashboard(db: Session = Depends(get_db)):
                             <th>Stop</th>
                             <th>Stop Source</th>
                             <th>Locked PnL</th>
+                            <th>Live PnL</th>
                             <th>Exit Reason</th>
                             <th>Updated</th>
                         </tr>
@@ -427,6 +515,7 @@ def dashboard(db: Session = Depends(get_db)):
                             <th>Stop</th>
                             <th>Stop Source</th>
                             <th>Locked PnL</th>
+                            <th>Live PnL</th>
                             <th>Exit Reason</th>
                             <th>Updated</th>
                         </tr>
@@ -521,6 +610,45 @@ def dashboard(db: Session = Depends(get_db)):
                 if (text) text.textContent = "Live — auto-updating";
             }}
 
+            // Asset point values mirrored from server (small table).
+            const POINT_VALUES = {{
+                MNQ:2, NQ:20, MES:5, ES:50, M2K:5, RTY:50, MYM:0.5, YM:5,
+                MGC:10, GC:100, CL:1000, MNG:1000, NG:10000
+            }};
+            function assetRoot(t) {{
+                if (!t) return "";
+                t = t.toUpperCase().trim();
+                if (t.endsWith("1!")) t = t.slice(0, -2);
+                // strip month-coded suffix (MNQM2026 -> MNQ)
+                if (t.length >= 5 && "FGHJKMNQUVXZ".includes(t[t.length-5]) &&
+                    /^\\d{{4}}$/.test(t.slice(-4))) {{ t = t.slice(0, -5); }}
+                return t;
+            }}
+            function fmtMoney(v) {{
+                const sign = v < 0 ? "-" : "";
+                return sign + "$" + Math.abs(v).toLocaleString(undefined,
+                    {{minimumFractionDigits:2, maximumFractionDigits:2}});
+            }}
+            function applyPnlTick(quotes) {{
+                document.querySelectorAll("tr[data-trade-id]").forEach((row) => {{
+                    const ticker = row.dataset.ticker;
+                    const entry  = parseFloat(row.dataset.entry);
+                    const side   = (row.dataset.side || "").toUpperCase();
+                    const qty    = parseInt(row.dataset.qtyOpen || "0", 10);
+                    const cell   = row.querySelector(".live-pnl-cell");
+                    if (!cell || !ticker || isNaN(entry) || !qty) return;
+                    const root   = assetRoot(ticker);
+                    const q      = quotes[root];
+                    if (!q) return;
+                    const last   = q.last || ((q.bid && q.ask) ? (q.bid+q.ask)/2 : null);
+                    const pv     = POINT_VALUES[root];
+                    if (last == null || pv == null) return;
+                    const sign   = side === "LONG" ? 1 : -1;
+                    const pnl    = (last - entry) * sign * qty * pv;
+                    const cls    = pnl >= 0 ? "pnl-pos" : "pnl-neg";
+                    cell.innerHTML = '<span class="' + cls + '">' + fmtMoney(pnl) + '</span>';
+                }});
+            }}
             function connect() {{
                 const ws = new WebSocket(url);
                 ws.onopen = () => {{ backoff = 500; markLive(); }};
@@ -531,6 +659,10 @@ def dashboard(db: Session = Depends(get_db)):
                         // Debounce — burst webhooks reload only once.
                         if (reloadTimer) clearTimeout(reloadTimer);
                         reloadTimer = setTimeout(() => location.reload(), 250);
+                    }} else if (msg.type === "pnl_tick") {{
+                        // Live PnL ticks — update cells in place, no
+                        // full reload. quotes shape: {{ROOT: {{last, ...}}}}
+                        applyPnlTick(msg.quotes || {{}});
                     }}
                 }};
                 ws.onclose = () => {{
@@ -618,10 +750,12 @@ def webhook(data: TradeEngineWebhook, db: Session = Depends(get_db)):
 
     db.refresh(signal)
 
+    # Tell the MD task about this symbol so it subscribes on next sweep.
+    if signal.event == "ENTRY":
+        _track_for_md(signal.ticker)
+
     # Push a notification to every connected dashboard so they re-fetch
-    # without manual reload. Payload kept small on purpose — clients pull
-    # the canonical state from /api/* so we don't have to keep two
-    # serializers in sync.
+    # without manual reload.
     ws_manager.broadcast_threadsafe({
         "type": "state_changed",
         "trigger": {
@@ -665,6 +799,7 @@ def list_signals(db: Session = Depends(get_db)):
 
 
 def _position_to_dict(p: Position) -> dict:
+    last = quote_store.last_price(p.ticker)
     return {
         "id": p.id,
         "trade_id": p.trade_id,
@@ -684,10 +819,18 @@ def _position_to_dict(p: Position) -> dict:
         "tp3_px": p.tp3_px,
         "tp3_qty": p.tp3_qty,
         "runner_qty": p.runner_qty,
-        # Locked PnL = the if-stop-hits-now value on currently-open qty.
-        # Positive when the stop has moved past entry (BE/jump/trail).
-        # Negative = remaining risk.
+        "broker": p.broker,
+        "broker_order_id": p.broker_order_id,
+        "broker_stop_order_id": p.broker_stop_order_id,
+        "avg_fill_price": p.avg_fill_price,
+        "realized_pnl": p.realized_pnl,
+        "broker_error": p.broker_error,
+        # PnL trio:
+        #   locked = if-stop-hits-now on qty_open
+        #   live   = unrealized at current MD price (None if no quote)
         "locked_pnl": locked_pnl(p.side, p.qty_open, p.entry_price, p.stop_price, p.ticker),
+        "live_pnl":   live_pnl(p.side, p.qty_open, p.entry_price, last, p.ticker),
+        "last_price": last,
         "point_value": point_value(p.ticker),
         "created_at": p.created_at,
         "updated_at": p.updated_at,

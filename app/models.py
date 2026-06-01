@@ -69,6 +69,21 @@ class Position(Base):
     # JUMP(TP3) / SWING / TICKS / EMA+ATR / MASTER / RESYNC.
     stop_source = Column(String, nullable=True)
 
+    # Phase 5b: which broker this position was placed on.
+    # "simulated" / "tradovate" / "tradovate-demo" / "tradovate-live".
+    broker = Column(String, nullable=True, index=True)
+    # Broker-issued ids — needed to modify stops + close positions later.
+    broker_order_id = Column(String, nullable=True)        # entry market order
+    broker_stop_order_id = Column(String, nullable=True)   # bracket stop order
+    # The price the broker actually filled the entry at (vs entry_price
+    # which is Pine's expected price). May differ by slippage.
+    avg_fill_price = Column(Float, nullable=True)
+    # Realized PnL — populated when position closes, from broker fills.
+    realized_pnl = Column(Float, nullable=True)
+    # Non-empty string ⇒ most recent broker call failed; surface on
+    # dashboard. Cleared on next successful broker call.
+    broker_error = Column(String, nullable=True)
+
 
 # ---------------------------------------------------------------------------
 # Phase 2.5: stop-update ledger
