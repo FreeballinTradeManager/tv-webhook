@@ -19,6 +19,7 @@ from .quote_store import store as quote_store
 from .brokers import get_broker
 from .db import SessionLocal
 from .reconciliation import reconcile_loop, recent_warnings
+from .dedup import is_duplicate, mark_seen, synth_entry_trade_id, synth_event_id
 
 import asyncio
 import logging
@@ -687,7 +688,51 @@ def webhook(data: TradeEngineWebhook, db: Session = Depends(get_db)):
     if data.key != os.getenv("USER_KEY", "trading123"):
         raise HTTPException(status_code=401, detail="Invalid webhook key")
 
-    # ---- Phase 1: duplicate protection ----------------------------------
+    # ---- Phase 5e: content-hash dedup (absorbs Pine spam) ---------------
+    # When the indicator re-fires the same alert within 60s (recompile,
+    # alert.freq_all re-evaluation, etc.) we drop the duplicate at the
+    # door — no Position mutation, no broadcast, no row written.
+    payload_dict = data.model_dump()
+    dup, payload_h = is_duplicate(payload_dict)
+    if dup:
+        return {
+            "message": "duplicate ignored (content hash)",
+            "status": "duplicate_ignored",
+            "dedupe_hash": payload_h,
+            "event": data.event,
+            "ticker": data.ticker,
+        }
+    mark_seen(payload_h)
+
+    # ---- Phase 5e: auto-synthesize trade_id + event_id ------------------
+    # The TM v20.80 doesn't send trade_id/event_id natively (v20.81 patch
+    # adds them). Until that patch lands we synthesize from payload data
+    # so the state machine still works:
+    #   ENTRY  → AUTO-<ticker>-<minute>-<side>
+    #   other  → look up most recent OPEN position for ticker, reuse its id
+    if not data.trade_id:
+        event_upper = (data.event or "").upper()
+        if event_upper == "ENTRY":
+            data.trade_id = synth_entry_trade_id(data.ticker, data.side)
+        else:
+            # Look up the most recent OPEN/PARTIAL position on this ticker.
+            # That's the trade these STOP_UPDATE / TPx / CLOSE events
+            # belong to.
+            active = (
+                db.query(Position)
+                .filter(
+                    Position.ticker == data.ticker,
+                    Position.status.in_(["OPEN", "PARTIAL", "PENDING"]),
+                )
+                .order_by(Position.updated_at.desc())
+                .first()
+            )
+            if active is not None:
+                data.trade_id = active.trade_id
+    if not data.event_id and data.trade_id:
+        data.event_id = synth_event_id(data.trade_id, data.event)
+
+    # ---- Phase 1: duplicate protection (UNIQUE index on event_id) -------
     if data.event_id:
         existing = (
             db.query(WebhookSignal)
