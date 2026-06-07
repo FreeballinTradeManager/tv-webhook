@@ -20,6 +20,7 @@ from .brokers import get_broker
 from .db import SessionLocal
 from .reconciliation import reconcile_loop, recent_warnings
 from .dedup import is_duplicate, mark_seen, synth_entry_trade_id, synth_event_id
+from .pmt_compat import PMTWebhook, pmt_to_trade_engine, PMT_COMPAT_KEY
 
 import asyncio
 import logging
@@ -681,6 +682,146 @@ def dashboard(db: Session = Depends(get_db)):
     """
 
     return HTMLResponse(content=html)
+
+
+@app.post("/api/webhook/pmt-compat")
+def webhook_pmt_compat(data: PMTWebhook, db: Session = Depends(get_db)):
+    """Observability sink for PMT-shaped webhooks (e.g. v17.9.16 automation).
+
+    The user keeps their existing TradingView alert pointing directly
+    at PMT for execution. They ALSO create a second alert with the same
+    conditions, webhook URL = this endpoint. The PMT JSON arrives here,
+    we translate to internal TradeEngine shape, run the dedup +
+    state-machine pipeline, and save a Position row to the dashboard.
+
+    This endpoint is HARDCODED to observe_only=True — even if PMT or
+    TradeSyncer env vars get set later, this path will NEVER place a
+    real broker order. Eliminates double-execution risk.
+    """
+    # Translate PMT shape → internal Trade Engine shape.
+    translated = pmt_to_trade_engine(data)
+    te_payload = TradeEngineWebhook(**translated)
+
+    # Content-hash dedup against the same 60s store. If TradingView spams
+    # the alert (which it sometimes does on re-evaluations), we collapse
+    # to a single Position row just like the main endpoint.
+    payload_dict = te_payload.model_dump()
+    dup, payload_h = is_duplicate(payload_dict)
+    if dup:
+        return {
+            "message": "duplicate ignored (content hash)",
+            "status": "duplicate_ignored",
+            "source": "pmt-compat",
+            "dedupe_hash": payload_h,
+            "event": te_payload.event,
+            "ticker": te_payload.ticker,
+        }
+    mark_seen(payload_h)
+
+    # Synthesize trade_id / event_id the same way the main endpoint does
+    # (Phase 5e).
+    if not te_payload.trade_id:
+        event_upper = (te_payload.event or "").upper()
+        if event_upper == "ENTRY":
+            te_payload.trade_id = synth_entry_trade_id(te_payload.ticker, te_payload.side)
+        else:
+            active = (
+                db.query(Position)
+                .filter(
+                    Position.ticker == te_payload.ticker,
+                    Position.status.in_(["OPEN", "PARTIAL", "PENDING"]),
+                )
+                .order_by(Position.updated_at.desc())
+                .first()
+            )
+            if active is not None:
+                te_payload.trade_id = active.trade_id
+                te_payload.side = active.side  # CLOSE didn't carry side
+    if not te_payload.event_id and te_payload.trade_id:
+        te_payload.event_id = synth_event_id(te_payload.trade_id, te_payload.event)
+
+    # DB-level dedup (UNIQUE index on event_id).
+    if te_payload.event_id:
+        existing = (
+            db.query(WebhookSignal)
+            .filter(WebhookSignal.event_id == te_payload.event_id)
+            .first()
+        )
+        if existing:
+            return {
+                "message": "duplicate ignored",
+                "status": "duplicate_ignored",
+                "source": "pmt-compat",
+                "id": existing.id,
+                "event_id": existing.event_id,
+                "trade_id": existing.trade_id,
+                "event": existing.event,
+                "ticker": existing.ticker,
+            }
+
+    # State machine — forced observe_only so NO broker call ever happens.
+    execution_result = execute_trade(te_payload, db, observe_only=True)
+    execution_result["source"] = "pmt-compat"
+
+    signal = WebhookSignal(
+        event=te_payload.event,
+        ticker=te_payload.ticker,
+        side=te_payload.side,
+        qty=te_payload.qty,
+        key=te_payload.key,
+        trade_id=te_payload.trade_id,
+        event_id=te_payload.event_id,
+        raw_payload=json.dumps({
+            "signal": te_payload.model_dump(),
+            "pmt_raw": data.model_dump(),
+            "execution": execution_result,
+        }),
+    )
+    db.add(signal)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        existing = (
+            db.query(WebhookSignal)
+            .filter(WebhookSignal.event_id == te_payload.event_id)
+            .first()
+        )
+        return {
+            "message": "duplicate ignored",
+            "status": "duplicate_ignored",
+            "source": "pmt-compat",
+            "id": existing.id if existing else None,
+            "event_id": te_payload.event_id,
+            "trade_id": te_payload.trade_id,
+            "event": te_payload.event,
+            "ticker": te_payload.ticker,
+        }
+    db.refresh(signal)
+
+    ws_manager.broadcast_threadsafe({
+        "type": "state_changed",
+        "trigger": {
+            "event": signal.event,
+            "ticker": signal.ticker,
+            "trade_id": signal.trade_id,
+            "event_id": signal.event_id,
+            "position_status": execution_result.get("position_status"),
+            "action": execution_result.get("action"),
+            "source": "pmt-compat",
+        },
+    })
+
+    return {
+        "message": "pmt-compat observed",
+        "status": "observed",
+        "id": signal.id,
+        "event": signal.event,
+        "ticker": signal.ticker,
+        "trade_id": signal.trade_id,
+        "event_id": signal.event_id,
+        "execution": execution_result,
+    }
 
 
 @app.post("/api/webhook/trade-engine")

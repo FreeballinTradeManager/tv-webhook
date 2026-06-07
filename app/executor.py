@@ -118,7 +118,14 @@ _TERMINAL = {"CLOSED", "CANCELLED"}
 _ACTIVE = {"OPEN", "PARTIAL", "PENDING"}
 
 
-def execute_trade(signal, db: Session | None = None) -> dict[str, Any]:
+def execute_trade(signal, db: Session | None = None, *, observe_only: bool = False) -> dict[str, Any]:
+    """Run the state machine + (unless observe_only) drive the broker.
+
+    observe_only=True forces SimulatedAdapter regardless of the active
+    broker — used by the /api/webhook/pmt-compat endpoint so that
+    secondary "observability" alerts can never accidentally place real
+    orders even if env vars later activate PMT/TradeSyncer/Tradovate.
+    """
     event = (signal.event or "").upper()
     trade_id = getattr(signal, "trade_id", None)
 
@@ -126,7 +133,12 @@ def execute_trade(signal, db: Session | None = None) -> dict[str, Any]:
     if not trade_id or db is None:
         return _legacy_execute(signal, event)
 
-    broker = get_broker()
+    if observe_only:
+        # Hard guarantee: this signal CANNOT touch a real broker.
+        from .brokers.simulated import SimulatedAdapter
+        broker = SimulatedAdapter()
+    else:
+        broker = get_broker()
     broker_name = f"{broker.name}-{broker.env}" if broker.env not in ("sim", "unknown") else broker.name
 
     position = (
