@@ -24,6 +24,7 @@ from .pmt_compat import PMTWebhook, pmt_to_trade_engine, PMT_COMPAT_KEY
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 
 log = logging.getLogger("tv-webhook.main")
 
@@ -187,6 +188,37 @@ def dashboard(db: Session = Depends(get_db)):
         .all()
     )
 
+    # Phase A: per-position stop history for Trade Cards.
+    # One-shot fetch of ALL stop updates whose trade_id matches any
+    # currently-active position — we bucket them client-side by trade_id.
+    active_trade_ids = [p.trade_id for p in active_positions if p.trade_id]
+    active_stops_by_trade: dict[str, list[StopUpdate]] = {}
+    if active_trade_ids:
+        rows = (
+            db.query(StopUpdate)
+            .filter(StopUpdate.trade_id.in_(active_trade_ids))
+            .order_by(StopUpdate.id.asc())
+            .all()
+        )
+        for su in rows:
+            active_stops_by_trade.setdefault(su.trade_id, []).append(su)
+
+    # Phase A: TP-hit lookup for Trade Cards — parse recent signals.
+    # For each active position, figure out which TPs have been fired
+    # (TP1/TP2/TP3 events on that trade_id).
+    tp_hits_by_trade: dict[str, set[str]] = {}
+    if active_trade_ids:
+        tp_rows = (
+            db.query(WebhookSignal)
+            .filter(
+                WebhookSignal.trade_id.in_(active_trade_ids),
+                WebhookSignal.event.in_(["TP1", "TP2", "TP3"]),
+            )
+            .all()
+        )
+        for r in tp_rows:
+            tp_hits_by_trade.setdefault(r.trade_id, set()).add(r.event)
+
     # --- Signal rows --------------------------------------------------------
     signal_rows = ""
     for s in signals:
@@ -276,6 +308,177 @@ def dashboard(db: Session = Depends(get_db)):
         """
 
     active_rows = "".join(_pos_row(p) for p in active_positions)
+
+    # --- Phase A: Rich Trade Cards -----------------------------------------
+    # For each active position, render a card with time-in-trade, TP ladder,
+    # locked PnL, stop history (with $ impact), and live PnL if MD is ready.
+    def _fmt_duration(start_dt) -> str:
+        if start_dt is None:
+            return "—"
+        try:
+            now = datetime.now(timezone.utc)
+            if start_dt.tzinfo is None:
+                start_dt = start_dt.replace(tzinfo=timezone.utc)
+            secs = int((now - start_dt).total_seconds())
+        except Exception:
+            return "—"
+        if secs < 0:
+            secs = 0
+        h = secs // 3600
+        m = (secs % 3600) // 60
+        s = secs % 60
+        if h:
+            return f"{h}h {m:02d}m"
+        return f"{m}m {s:02d}s"
+
+    def _tp_row(label: str, hit: bool, px: float | None, qty: int | None,
+                side: str, entry: float | None, pv: float | None) -> str:
+        if px is None or not qty:
+            return f'<div class="tp-row tp-off">— {label} disabled</div>'
+        icon = "✅" if hit else "⏳"
+        cls = "tp-row tp-hit" if hit else "tp-row"
+        # Estimated $ per TP: (tp - entry) * side * qty * pv
+        dollars = ""
+        if entry is not None and pv is not None:
+            sign = 1.0 if (side or "").upper() == "LONG" else -1.0
+            d = (px - entry) * sign * qty * pv
+            dollars = f'<span class="tp-dollars">${d:,.2f}</span>'
+        state = "hit" if hit else "pending"
+        return f"""
+        <div class="{cls}">
+            <span class="tp-icon">{icon}</span>
+            <span class="tp-name">{label}</span>
+            <span class="tp-px">{px}</span>
+            <span class="tp-qty">×{qty}</span>
+            {dollars}
+            <span class="tp-state">{state}</span>
+        </div>
+        """
+
+    def _stop_hist_row(su: StopUpdate, entry: float | None, side: str,
+                       qty_total: int | None, pv: float | None) -> str:
+        # Compute $ impact if we can — (new_stop - entry) * side * qty * pv
+        dollars = "—"
+        if entry is not None and pv is not None and qty_total:
+            sign = 1.0 if (side or "").upper() == "LONG" else -1.0
+            d = (su.new_stop - entry) * sign * qty_total * pv
+            cls = "pnl-pos" if d >= 0 else "pnl-neg"
+            dollars = f'<span class="{cls}">${d:,.2f}</span>'
+        delta = ""
+        if su.old_stop is not None:
+            diff = su.new_stop - su.old_stop
+            sign_str = "+" if diff > 0 else ""
+            delta = f'<span class="hint">({sign_str}{diff:.2f})</span>'
+        return f"""
+        <div class="stop-hist-row">
+            <span class="badge status-stop">{su.source or "—"}</span>
+            <span>{su.old_stop if su.old_stop is not None else "—"} → <strong>{su.new_stop}</strong> {delta}</span>
+            <span class="tp-dollars">{dollars}</span>
+            <span class="hint">{su.created_at.strftime("%H:%M:%S") if su.created_at else ""}</span>
+        </div>
+        """
+
+    def _trade_card(p: Position) -> str:
+        pv = point_value(p.ticker)
+        locked = locked_pnl(p.side, p.qty_open, p.entry_price, p.stop_price, p.ticker)
+        last = quote_store.last_price(p.ticker)
+        live = live_pnl(p.side, p.qty_open, p.entry_price, last, p.ticker)
+
+        hit_set = tp_hits_by_trade.get(p.trade_id, set())
+        stop_history = active_stops_by_trade.get(p.trade_id, [])
+
+        side_class = "side-long" if (p.side or "").upper() == "LONG" else "side-short"
+        status_class = f"status-{p.status.lower()}"
+
+        # Slippage line (only shown if broker actually filled)
+        slip_html = ""
+        if p.avg_fill_price is not None and p.entry_price is not None and pv is not None:
+            slip_pts = p.avg_fill_price - p.entry_price
+            slip_side = 1.0 if (p.side or "").upper() == "LONG" else -1.0
+            slip_dollars = slip_pts * slip_side * (p.qty_total or p.qty_open or 0) * pv
+            cls = "pnl-neg" if slip_dollars < 0 else "pnl-pos"
+            slip_html = f'<div class="tc-line"><span class="tc-k">Slippage</span><span class="tc-v">{slip_pts:+.2f} pts <span class="{cls}">${slip_dollars:+,.2f}</span></span></div>'
+
+        # Broker error banner
+        error_banner = ""
+        if p.broker_error:
+            error_banner = f'<div class="tc-error">⚠️ Broker error: {p.broker_error}</div>'
+
+        # TP ladder rows
+        tp_html = "".join([
+            _tp_row("TP1", "TP1" in hit_set, p.tp1_px, p.tp1_qty, p.side, p.entry_price, pv),
+            _tp_row("TP2", "TP2" in hit_set, p.tp2_px, p.tp2_qty, p.side, p.entry_price, pv),
+            _tp_row("TP3", "TP3" in hit_set, p.tp3_px, p.tp3_qty, p.side, p.entry_price, pv),
+        ])
+        runner_line = ""
+        if p.runner_qty:
+            runner_line = f'<div class="tp-row tp-runner"><span class="tp-icon">🏃</span><span class="tp-name">Runner</span><span class="tp-qty">×{p.runner_qty}</span><span class="tp-state">trail-managed</span></div>'
+
+        # Stop history rows (chronological, oldest first)
+        if stop_history:
+            stop_html = "".join(_stop_hist_row(su, p.entry_price, p.side, p.qty_total, pv) for su in stop_history)
+        else:
+            stop_html = '<div class="empty">No stop moves yet — position at BASE stop</div>'
+
+        # Live vs Locked PnL block
+        def _pnl_v(v):
+            if v is None:
+                return "—"
+            cls = "pnl-pos" if v >= 0 else "pnl-neg"
+            return f'<span class="{cls}">${v:,.2f}</span>'
+
+        locked_line = f'<div class="tc-pnl-line"><span class="tc-k">Locked (if stop hits)</span><span class="tc-v tc-pnl-big">{_pnl_v(locked)}</span></div>'
+        live_line = ""
+        if live is not None:
+            live_line = f'<div class="tc-pnl-line tc-pnl-live"><span class="tc-k">Live (@ {last})</span><span class="tc-v tc-pnl-big">{_pnl_v(live)}</span></div>'
+
+        return f"""
+        <div class="trade-card">
+            <div class="tc-header">
+                <div class="tc-title">
+                    <span class="tc-ticker">{p.ticker}</span>
+                    <span class="badge {side_class}">{p.side}</span>
+                    <span class="badge {status_class}">{p.status}</span>
+                </div>
+                <div class="tc-meta">
+                    <span class="hint">Trade {p.trade_id}</span>
+                    <span class="hint">·</span>
+                    <span class="hint">{_fmt_duration(p.created_at)} in trade</span>
+                </div>
+            </div>
+            {error_banner}
+            <div class="tc-grid">
+                <div class="tc-left">
+                    <div class="tc-line"><span class="tc-k">Entry</span><span class="tc-v"><strong>{p.entry_price if p.entry_price is not None else "—"}</strong></span></div>
+                    <div class="tc-line"><span class="tc-k">Stop</span><span class="tc-v"><strong>{p.stop_price if p.stop_price is not None else "—"}</strong> <span class="hint">{p.stop_source or "BASE"}</span></span></div>
+                    <div class="tc-line"><span class="tc-k">Qty open / total</span><span class="tc-v">{p.qty_open}/{p.qty_total}</span></div>
+                    {slip_html}
+                    <div class="tc-line"><span class="tc-k">Broker</span><span class="tc-v"><span class="hint">{p.broker or "—"}</span></span></div>
+                </div>
+                <div class="tc-right">
+                    <div class="tc-pnl-panel">
+                        {live_line}
+                        {locked_line}
+                    </div>
+                </div>
+            </div>
+            <div class="tc-section">
+                <div class="tc-section-title">TP Ladder</div>
+                <div class="tp-ladder">
+                    {tp_html}
+                    {runner_line}
+                </div>
+            </div>
+            <div class="tc-section">
+                <div class="tc-section-title">Stop History <span class="hint">(chronological — includes $ impact if stop had hit at that level)</span></div>
+                <div class="stop-hist">
+                    {stop_html}
+                </div>
+            </div>
+        </div>
+        """
+
+    trade_cards_html = "".join(_trade_card(p) for p in active_positions)
     closed_rows = "".join(_pos_row(p) for p in closed_positions)
 
     # --- Stop update ledger rows --------------------------------------------
@@ -411,6 +614,102 @@ def dashboard(db: Session = Depends(get_db)):
             .status-cancelled{{ background: rgba(239,68,68,0.18); color: #fca5a5; }}
             .side-long   {{ background: rgba(34,197,94,0.18);  color: #86efac; }}
             .side-short  {{ background: rgba(239,68,68,0.18);  color: #fca5a5; }}
+
+            /* ---- Phase A: Trade Cards ---------------------------------- */
+            .trade-card {{
+                background: rgba(255,255,255,0.04);
+                border: 1px solid rgba(255,255,255,0.10);
+                border-radius: 20px;
+                padding: 18px 20px;
+                margin-bottom: 16px;
+                box-shadow: 0 6px 24px rgba(0,0,0,0.20);
+            }}
+            .tc-header {{
+                display: flex;
+                justify-content: space-between;
+                align-items: baseline;
+                gap: 12px;
+                flex-wrap: wrap;
+                margin-bottom: 12px;
+            }}
+            .tc-title {{
+                display: flex; align-items: center; gap: 10px; font-size: 20px; font-weight: 700;
+            }}
+            .tc-ticker {{ color: #f5f7fb; }}
+            .tc-meta {{ display: flex; gap: 8px; align-items: center; font-size: 13px; }}
+            .tc-error {{
+                background: rgba(239,68,68,0.18);
+                border: 1px solid rgba(239,68,68,0.4);
+                border-radius: 12px;
+                padding: 10px 14px;
+                margin: 8px 0 12px 0;
+                color: #fca5a5;
+                font-weight: 600;
+            }}
+            .tc-grid {{
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 20px;
+                margin-bottom: 14px;
+            }}
+            @media (max-width: 720px) {{
+                .tc-grid {{ grid-template-columns: 1fr; }}
+            }}
+            .tc-line {{
+                display: flex; justify-content: space-between; align-items: baseline; padding: 6px 0;
+                border-bottom: 1px dashed rgba(255,255,255,0.06);
+            }}
+            .tc-k {{ color: #8ea0c9; font-size: 13px; }}
+            .tc-v {{ font-size: 15px; }}
+            .tc-pnl-panel {{
+                background: rgba(255,255,255,0.02);
+                border: 1px solid rgba(255,255,255,0.06);
+                border-radius: 14px;
+                padding: 14px 16px;
+                height: 100%;
+            }}
+            .tc-pnl-line {{
+                display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px;
+            }}
+            .tc-pnl-live {{
+                border-bottom: 1px solid rgba(255,255,255,0.08);
+                padding-bottom: 10px;
+                margin-bottom: 10px;
+            }}
+            .tc-pnl-big {{ font-size: 24px; font-weight: 700; }}
+            .tc-section {{ margin-top: 14px; }}
+            .tc-section-title {{
+                color: #8ea0c9; font-size: 12px; text-transform: uppercase; letter-spacing: 0.14em;
+                margin-bottom: 8px;
+            }}
+            .tp-ladder {{ display: flex; flex-direction: column; gap: 4px; }}
+            .tp-row {{
+                display: grid;
+                grid-template-columns: 30px 60px 90px 60px 1fr auto;
+                gap: 12px;
+                align-items: center;
+                padding: 8px 12px;
+                background: rgba(255,255,255,0.03);
+                border-radius: 10px;
+                font-size: 14px;
+            }}
+            .tp-row.tp-hit {{ background: rgba(34,197,94,0.12); border: 1px solid rgba(34,197,94,0.25); }}
+            .tp-row.tp-off {{ background: transparent; color: rgba(255,255,255,0.35); font-style: italic; }}
+            .tp-row.tp-runner {{ background: rgba(168,85,247,0.12); border: 1px solid rgba(168,85,247,0.30); }}
+            .tp-icon {{ text-align: center; }}
+            .tp-dollars {{ color: #86efac; font-weight: 600; }}
+            .tp-state {{ color: #8ea0c9; font-size: 12px; text-transform: uppercase; letter-spacing: 0.12em; }}
+            .stop-hist {{ display: flex; flex-direction: column; gap: 4px; }}
+            .stop-hist-row {{
+                display: grid;
+                grid-template-columns: auto 1fr auto auto;
+                gap: 14px;
+                align-items: center;
+                padding: 8px 12px;
+                background: rgba(255,255,255,0.03);
+                border-radius: 10px;
+                font-size: 13px;
+            }}
             .pnl-pos     {{ color: #86efac; font-weight: 700; }}
             .pnl-neg     {{ color: #fca5a5; font-weight: 700; }}
             .live-dot {{
@@ -471,8 +770,16 @@ def dashboard(db: Session = Depends(get_db)):
 
             <div class="panel">
                 <div class="panel-head">
+                    <div class="panel-title">🎯 Live Trades</div>
+                    <div class="hint">Rich per-trade view — full context on entry, TPs, stops, PnL</div>
+                </div>
+                {trade_cards_html if trade_cards_html else '<div class="empty">No live trades right now. Cards will appear here when a trade is active.</div>'}
+            </div>
+
+            <div class="panel">
+                <div class="panel-head">
                     <div class="panel-title">Active Positions</div>
-                    <div class="hint">PENDING · OPEN · PARTIAL</div>
+                    <div class="hint">PENDING · OPEN · PARTIAL — compact table view</div>
                 </div>
                 {f'''
                 <table>
