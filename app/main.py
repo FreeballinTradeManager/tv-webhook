@@ -1311,6 +1311,34 @@ def webhook_pmt_compat(data: PMTWebhook, db: Session = Depends(get_db)):
     }
 
 
+# ---------------------------------------------------------------------------
+# Phase 1.2a: source-specific webhook endpoints
+# ---------------------------------------------------------------------------
+# Two thin wrappers that inject a default group name based on which URL the
+# Pine indicator posts to. Lets user run BOTH the automation and the manual
+# TM on the same server, same asset, without any Pine edits — just point
+# each indicator at its own URL.
+#
+#   Automation (v2.68 + 6.24)  →  /api/webhook/trade-engine/auto     (group defaults to "auto")
+#   Manual TM  (v20.88)        →  /api/webhook/trade-engine/manual   (group defaults to "manual")
+#
+# If the payload already carries a `group` field, that wins — the URL only
+# provides a default.
+
+@app.post("/api/webhook/trade-engine/auto")
+def webhook_auto(data: TradeEngineWebhook, db: Session = Depends(get_db)):
+    if not data.group:
+        data.group = "auto"
+    return webhook(data, db)
+
+
+@app.post("/api/webhook/trade-engine/manual")
+def webhook_manual(data: TradeEngineWebhook, db: Session = Depends(get_db)):
+    if not data.group:
+        data.group = "manual"
+    return webhook(data, db)
+
+
 @app.post("/api/webhook/trade-engine")
 def webhook(data: TradeEngineWebhook, db: Session = Depends(get_db)):
     if data.key != os.getenv("USER_KEY", "trading123"):

@@ -162,6 +162,25 @@ class Account(Base):
     active = Column(Boolean, nullable=False, default=True)   # false = fully off
     paused = Column(Boolean, nullable=False, default=False)  # true = skip orders but keep tracking
 
+    # Phase 1.2: rotation state machine.
+    #   active  = currently in the fan-out rotation
+    #   benched = ready to go, waiting on standby
+    #   cooled  = hit win threshold, taken off rotation (banks profit)
+    #   stopped = hit loss threshold, fully blocked until manual reset
+    state = Column(String, nullable=False, default="active", index=True)
+
+    # Phase 1.2: win/loss counters. Cycle = since last state change.
+    # Today = since UTC midnight (reset by background task).
+    wins_cycle = Column(Integer, nullable=False, default=0)
+    losses_cycle = Column(Integer, nullable=False, default=0)
+    wins_today = Column(Integer, nullable=False, default=0)
+    losses_today = Column(Integer, nullable=False, default=0)
+    # Cumulative realized $ PnL over the current cycle. Used with
+    # Group.rotate_after_profit_$ to rotate an account off once it's
+    # banked enough profit ("take money and run" style).
+    pnl_cycle = Column(Float, nullable=False, default=0.0)
+    pnl_today = Column(Float, nullable=False, default=0.0)
+
     # Broker-specific config (webhook URLs, tokens etc.). Kept as JSON so
     # each broker can carry different fields without schema churn.
     # Sensitive fields (tokens, passwords) are typically stored in Railway
@@ -191,6 +210,18 @@ class Group(Base):
     name = Column(String, nullable=False, unique=True, index=True)
     description = Column(Text, nullable=True)
     active = Column(Boolean, nullable=False, default=True)
+
+    # Phase 1.2: rotation rules.
+    # After N wins on an active member, that account moves to "cooled"
+    # state and the next benched account takes its slot.
+    # After N losses, member moves to "stopped".
+    # min_active_count = keep at least this many active members if bench
+    # has enough accounts.
+    rotate_after_wins = Column(Integer, nullable=True)     # null = no win rotation
+    rotate_after_losses = Column(Integer, nullable=True)   # null = no loss rotation
+    rotate_after_profit = Column(Float, nullable=True)     # rotate when Account.pnl_cycle >= this $ amount
+    rotate_after_loss_pnl = Column(Float, nullable=True)   # rotate when Account.pnl_cycle <= -this $ amount
+    min_active_count = Column(Integer, nullable=False, default=1)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(

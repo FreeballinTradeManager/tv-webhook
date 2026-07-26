@@ -71,6 +71,21 @@ MIGRATIONS = [
     "ALTER TABLE positions ADD COLUMN IF NOT EXISTS group_name TEXT",
     "CREATE INDEX IF NOT EXISTS ix_positions_account_id ON positions (account_id)",
     "CREATE INDEX IF NOT EXISTS ix_positions_group_name ON positions (group_name)",
+
+    # Phase 1.2: rotation state machine + counters.
+    "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS state TEXT NOT NULL DEFAULT 'active'",
+    "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS wins_cycle INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS losses_cycle INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS wins_today INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS losses_today INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS pnl_cycle DOUBLE PRECISION NOT NULL DEFAULT 0",
+    "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS pnl_today DOUBLE PRECISION NOT NULL DEFAULT 0",
+    "CREATE INDEX IF NOT EXISTS ix_accounts_state ON accounts (state)",
+    "ALTER TABLE groups ADD COLUMN IF NOT EXISTS rotate_after_wins INTEGER",
+    "ALTER TABLE groups ADD COLUMN IF NOT EXISTS rotate_after_losses INTEGER",
+    "ALTER TABLE groups ADD COLUMN IF NOT EXISTS rotate_after_profit DOUBLE PRECISION",
+    "ALTER TABLE groups ADD COLUMN IF NOT EXISTS rotate_after_loss_pnl DOUBLE PRECISION",
+    "ALTER TABLE groups ADD COLUMN IF NOT EXISTS min_active_count INTEGER NOT NULL DEFAULT 1",
     # Foreign key added separately with NOT VALID so it never blocks
     # startup even if there are orphaned rows. Postgres validates lazily.
     # Wrapped in DO block for idempotency (Postgres doesn't have

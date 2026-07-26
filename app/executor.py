@@ -38,6 +38,165 @@ def _now_iso() -> str:
     return datetime.utcnow().isoformat()
 
 
+# ---------------------------------------------------------------------------
+# Phase 1.2: rotation trigger on position close
+# ---------------------------------------------------------------------------
+# Called whenever a Position transitions to CLOSED. Updates the account's
+# win/loss counters (using stop-vs-entry as a WIN/LOSS proxy since real
+# fill-based PnL isn't wired yet) then applies any group rotation rules:
+#
+#   - Group.rotate_after_wins: after N cycle wins → account state="cooled"
+#   - Group.rotate_after_losses: after N cycle losses → account state="stopped"
+#   - After transition, promote the highest-priority "benched" member of
+#     the same group to "active" so the fan-out slot stays full.
+#
+# Runs inline in the executor's DB session — no async background job.
+
+def _classify_win_loss(position) -> str:
+    """Return 'win' | 'loss' | 'unknown'."""
+    if position.realized_pnl is not None:
+        return "win" if position.realized_pnl > 0 else "loss"
+    if position.exit_reason == "all_tps_filled":
+        return "win"
+    if position.exit_reason == "stop_hit":
+        return "loss"
+    # Proxy: stop position vs entry. LONG win = stop >= entry, LOSS = stop < entry.
+    if position.stop_price is not None and position.entry_price is not None:
+        if (position.side or "").upper() == "LONG":
+            return "win" if position.stop_price >= position.entry_price else "loss"
+        else:
+            return "win" if position.stop_price <= position.entry_price else "loss"
+    return "unknown"
+
+
+def _apply_rotation_on_close(position, db: Session) -> dict:
+    """Increment account counters + apply group rotation rules if any.
+
+    Returns a dict describing what happened (surfaces in execution result).
+    """
+    if position.account_id is None:
+        return {"rotation_check": "skipped_no_account"}
+
+    # Deferred import to avoid circular reference at module load.
+    from .models import Account, Group, GroupMember
+
+    acct = db.query(Account).filter(Account.id == position.account_id).first()
+    if acct is None:
+        return {"rotation_check": "skipped_account_missing"}
+
+    verdict = _classify_win_loss(position)
+    if verdict == "win":
+        acct.wins_cycle = (acct.wins_cycle or 0) + 1
+        acct.wins_today = (acct.wins_today or 0) + 1
+    elif verdict == "loss":
+        acct.losses_cycle = (acct.losses_cycle or 0) + 1
+        acct.losses_today = (acct.losses_today or 0) + 1
+    else:
+        return {"rotation_check": "skipped_unknown_verdict"}
+
+    # Track cumulative $ PnL for this cycle so we can rotate on dollar
+    # thresholds ("turn off after $500 profit"). Uses realized_pnl if
+    # available, otherwise the locked-stop proxy (stop vs entry × qty × pv).
+    trade_pnl = position.realized_pnl or 0.0
+    if not trade_pnl and position.stop_price is not None and position.entry_price is not None:
+        from .assets import point_value
+        pv = point_value(position.ticker) or 0.0
+        sign = 1.0 if (position.side or "").upper() == "LONG" else -1.0
+        trade_pnl = (position.stop_price - position.entry_price) * sign * (position.qty_total or 0) * pv
+    acct.pnl_cycle = (acct.pnl_cycle or 0.0) + trade_pnl
+    acct.pnl_today = (acct.pnl_today or 0.0) + trade_pnl
+
+    result = {
+        "verdict": verdict,
+        "wins_cycle": acct.wins_cycle,
+        "losses_cycle": acct.losses_cycle,
+        "pnl_cycle": round(acct.pnl_cycle, 2),
+        "trade_pnl": round(trade_pnl, 2),
+    }
+
+    if not position.group_name:
+        return {**result, "rotation_check": "no_group"}
+
+    grp = db.query(Group).filter(Group.name == position.group_name).first()
+    if grp is None:
+        return {**result, "rotation_check": "group_missing"}
+
+    # Find this account's membership in the group.
+    mem = (
+        db.query(GroupMember)
+        .filter(
+            GroupMember.group_id == grp.id,
+            GroupMember.account_id == acct.id,
+        )
+        .first()
+    )
+    if mem is None or not mem.active:
+        return {**result, "rotation_check": "not_a_group_member"}
+
+    new_state = None
+    rotation_reason = None
+    if grp.rotate_after_wins and acct.wins_cycle >= grp.rotate_after_wins:
+        new_state = "cooled"
+        rotation_reason = f"hit {grp.rotate_after_wins} wins"
+    elif grp.rotate_after_losses and acct.losses_cycle >= grp.rotate_after_losses:
+        new_state = "stopped"
+        rotation_reason = f"hit {grp.rotate_after_losses} losses"
+    elif grp.rotate_after_profit and acct.pnl_cycle >= grp.rotate_after_profit:
+        new_state = "cooled"
+        rotation_reason = f"hit profit cap ${grp.rotate_after_profit:.0f}"
+    elif grp.rotate_after_loss_pnl and acct.pnl_cycle <= -abs(grp.rotate_after_loss_pnl):
+        new_state = "stopped"
+        rotation_reason = f"hit loss cap -${abs(grp.rotate_after_loss_pnl):.0f}"
+
+    if new_state is None:
+        return {**result, "rotation_check": "no_threshold_hit"}
+
+    # Transition current account off the active rotation.
+    acct.state = new_state
+    acct.wins_cycle = 0
+    acct.losses_cycle = 0
+    acct.pnl_cycle = 0.0
+    result["state_change"] = f"active→{new_state}"
+    result["rotation_reason"] = rotation_reason
+
+    # Promote next benched account to keep the fan-out slot full.
+    promoted = None
+    if grp.min_active_count:
+        active_count = (
+            db.query(Account)
+            .join(GroupMember, GroupMember.account_id == Account.id)
+            .filter(
+                GroupMember.group_id == grp.id,
+                GroupMember.active == True,  # noqa: E712
+                Account.state == "active",
+                Account.active == True,  # noqa: E712
+            )
+            .count()
+        )
+        if active_count < grp.min_active_count:
+            # Pull highest-priority benched member.
+            candidate = (
+                db.query(Account)
+                .join(GroupMember, GroupMember.account_id == Account.id)
+                .filter(
+                    GroupMember.group_id == grp.id,
+                    GroupMember.active == True,  # noqa: E712
+                    Account.state == "benched",
+                    Account.active == True,  # noqa: E712
+                )
+                .order_by(GroupMember.priority.asc(), Account.id.asc())
+                .first()
+            )
+            if candidate is not None:
+                candidate.state = "active"
+                candidate.wins_cycle = 0
+                candidate.losses_cycle = 0
+                promoted = {"account_id": candidate.id, "name": candidate.name}
+
+    result["promoted"] = promoted
+    return result
+
+
 def _sim_result(action: str, signal, **extra) -> dict[str, Any]:
     return {
         "status": "executed_sim",
@@ -258,13 +417,15 @@ def execute_trade(signal, db: Session | None = None, *,
         _apply_broker_result(position, result, persist_ids=False)
 
         position.qty_open -= reduce_by
+        rotation_info = None
         if position.qty_open <= 0:
             position.qty_open = 0
             position.status = "CLOSED"
             position.exit_reason = "all_tps_filled"
+            rotation_info = _apply_rotation_on_close(position, db)
         else:
             position.status = "PARTIAL"
-        return _ok(f"processed_{event.lower()}", signal, position, reduced_by=reduce_by)
+        return _ok(f"processed_{event.lower()}", signal, position, reduced_by=reduce_by, rotation=rotation_info)
 
     # ---- CLOSE50 ---------------------------------------------------------
     if event == "CLOSE50":
@@ -283,13 +444,15 @@ def execute_trade(signal, db: Session | None = None, *,
         _apply_broker_result(position, result, persist_ids=False)
 
         position.qty_open -= reduce_by
+        rotation_info = None
         if position.qty_open <= 0:
             position.qty_open = 0
             position.status = "CLOSED"
             position.exit_reason = "close_half_to_zero"
+            rotation_info = _apply_rotation_on_close(position, db)
         else:
             position.status = "PARTIAL"
-        return _ok("closed_half", signal, position, reduced_by=reduce_by)
+        return _ok("closed_half", signal, position, reduced_by=reduce_by, rotation=rotation_info)
 
     # ---- Master closes ---------------------------------------------------
     if event in _CLOSE_EVENTS:
@@ -306,7 +469,8 @@ def execute_trade(signal, db: Session | None = None, *,
         position.qty_open = 0
         position.status = "CLOSED"
         position.exit_reason = event.lower()
-        return _ok("closed_all", signal, position)
+        rotation_info = _apply_rotation_on_close(position, db)
+        return _ok("closed_all", signal, position, rotation=rotation_info)
 
     # ---- Unknown event ---------------------------------------------------
     return {
