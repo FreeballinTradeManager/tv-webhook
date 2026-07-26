@@ -62,6 +62,32 @@ MIGRATIONS = [
     "ALTER TABLE positions ADD COLUMN IF NOT EXISTS realized_pnl DOUBLE PRECISION",
     "ALTER TABLE positions ADD COLUMN IF NOT EXISTS broker_error TEXT",
     "CREATE INDEX IF NOT EXISTS ix_positions_broker ON positions (broker)",
+
+    # Phase 1.1: multi-account fan-out.
+    # accounts / groups / group_members tables created by Base.metadata.create_all.
+    # Position now carries account_id (nullable — legacy rows stay NULL) +
+    # group_name (which group's fan-out spawned this position, if any).
+    "ALTER TABLE positions ADD COLUMN IF NOT EXISTS account_id INTEGER",
+    "ALTER TABLE positions ADD COLUMN IF NOT EXISTS group_name TEXT",
+    "CREATE INDEX IF NOT EXISTS ix_positions_account_id ON positions (account_id)",
+    "CREATE INDEX IF NOT EXISTS ix_positions_group_name ON positions (group_name)",
+    # Foreign key added separately with NOT VALID so it never blocks
+    # startup even if there are orphaned rows. Postgres validates lazily.
+    # Wrapped in DO block for idempotency (Postgres doesn't have
+    # ADD CONSTRAINT IF NOT EXISTS for foreign keys before v18).
+    """
+    DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint WHERE conname = 'positions_account_id_fkey'
+        ) THEN
+            ALTER TABLE positions
+                ADD CONSTRAINT positions_account_id_fkey
+                FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE SET NULL
+                NOT VALID;
+        END IF;
+    END $$;
+    """,
 ]
 
 

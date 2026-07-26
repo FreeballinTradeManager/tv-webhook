@@ -11,7 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from .db import get_db, run_migrations
 # Import models so SQLAlchemy registers tables before run_migrations() runs.
 from . import models  # noqa: F401
-from .models import WebhookSignal, Position, StopUpdate
+from .models import WebhookSignal, Position, StopUpdate, Account, Group, GroupMember, BROKER_KINDS
 from .executor import execute_trade
 from .ws import manager as ws_manager
 from .assets import locked_pnl, live_pnl, point_value, asset_root
@@ -132,6 +132,12 @@ class TradeEngineWebhook(BaseModel):
     remaining_qty: Optional[int] = None
     # Sent on ENTRY + STOP_UPDATE — Pine's stop_src (BASE / BE / JUMP / TRAIL / RESYNC / MASTER)
     source: Optional[str] = None
+
+    # Phase 1.1: fan-out target. When set, server routes the signal to
+    # every active member of the named group. When absent, server runs
+    # the existing single-position path (broker from get_broker(), one
+    # Position row).
+    group: Optional[str] = None
 
 
 @app.get("/")
@@ -479,6 +485,97 @@ def dashboard(db: Session = Depends(get_db)):
         """
 
     trade_cards_html = "".join(_trade_card(p) for p in active_positions)
+
+    # --- Phase 1.1: Accounts + Groups data for the two new panels -----------
+    from .models import Account, Group, GroupMember
+    from datetime import date as _date
+    _all_accounts = db.query(Account).order_by(Account.id.asc()).all()
+    _all_groups = (
+        db.query(Group)
+        .order_by(Group.id.asc())
+        .all()
+    )
+
+    # Today's realized PnL per account — sum of realized_pnl on positions
+    # closed today (or since UTC midnight).
+    from datetime import datetime as _dt
+    _today_utc = _dt.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    _todays_realized_by_acct: dict[int, float] = {}
+    if _all_accounts:
+        acct_ids = [a.id for a in _all_accounts]
+        _today_positions = (
+            db.query(Position)
+            .filter(
+                Position.account_id.in_(acct_ids),
+                Position.status.in_(["CLOSED", "CANCELLED"]),
+                Position.updated_at >= _today_utc,
+            )
+            .all()
+        )
+        for p in _today_positions:
+            if p.realized_pnl is not None:
+                _todays_realized_by_acct[p.account_id] = (
+                    _todays_realized_by_acct.get(p.account_id, 0.0) + float(p.realized_pnl)
+                )
+
+    def _acct_row(a: Account) -> str:
+        # Realized today
+        today = _todays_realized_by_acct.get(a.id, 0.0)
+        today_cls = "pnl-pos" if today >= 0 else "pnl-neg"
+        today_html = f'<span class="{today_cls}">${today:,.2f}</span>'
+
+        # Daily limit progress bar (0-100%)
+        limit_html = "—"
+        if a.daily_loss_limit and a.daily_loss_limit > 0:
+            used = min(abs(min(today, 0.0)), a.daily_loss_limit)
+            pct = int((used / a.daily_loss_limit) * 100)
+            bar_cls = "limit-bar-safe" if pct < 60 else ("limit-bar-warn" if pct < 90 else "limit-bar-danger")
+            limit_html = f"""
+            <div class="limit-bar-wrap">
+                <div class="limit-bar {bar_cls}" style="width:{pct}%"></div>
+                <div class="limit-bar-text">${used:,.0f} / ${a.daily_loss_limit:,.0f}</div>
+            </div>
+            """
+
+        active_badge = '<span class="badge status-open">ACTIVE</span>' if a.active else '<span class="badge status-closed">OFF</span>'
+        paused_badge = ' <span class="badge status-stop">PAUSED</span>' if a.paused else ''
+        return f"""
+        <tr>
+            <td>{a.id}</td>
+            <td><strong>{a.name}</strong></td>
+            <td><span class="hint">{a.broker}</span></td>
+            <td>{a.env}</td>
+            <td>{a.account_id or "—"}</td>
+            <td>{a.multiplier}×</td>
+            <td>{today_html}</td>
+            <td>{limit_html}</td>
+            <td>{active_badge}{paused_badge}</td>
+        </tr>
+        """
+
+    accounts_html = "".join(_acct_row(a) for a in _all_accounts)
+
+    def _group_row(g: Group) -> str:
+        members_html = "<span class='hint'>no members yet</span>"
+        if g.members:
+            active_members = [m for m in g.members if m.active]
+            if active_members:
+                members_html = " ".join([
+                    f'<span class="chip">{m.account.name if m.account else "?"} <span class="hint">×{m.multiplier}</span></span>'
+                    for m in sorted(active_members, key=lambda x: x.priority)
+                ])
+        active_badge = '<span class="badge status-open">ACTIVE</span>' if g.active else '<span class="badge status-closed">OFF</span>'
+        return f"""
+        <tr>
+            <td>{g.id}</td>
+            <td><strong>{g.name}</strong></td>
+            <td>{g.description or "—"}</td>
+            <td>{members_html}</td>
+            <td>{active_badge}</td>
+        </tr>
+        """
+
+    groups_html = "".join(_group_row(g) for g in _all_groups)
     closed_rows = "".join(_pos_row(p) for p in closed_positions)
 
     # --- Stop update ledger rows --------------------------------------------
@@ -710,6 +807,43 @@ def dashboard(db: Session = Depends(get_db)):
                 border-radius: 10px;
                 font-size: 13px;
             }}
+
+            /* ---- Phase 1.1: Accounts + Groups panels ------------------ */
+            .chip {{
+                display: inline-block;
+                padding: 3px 10px;
+                margin: 2px 4px 2px 0;
+                background: rgba(59,130,246,0.15);
+                border: 1px solid rgba(59,130,246,0.35);
+                border-radius: 12px;
+                font-size: 12px;
+            }}
+            .limit-bar-wrap {{
+                position: relative;
+                width: 160px;
+                height: 20px;
+                background: rgba(255,255,255,0.06);
+                border-radius: 6px;
+                overflow: hidden;
+            }}
+            .limit-bar {{
+                height: 100%;
+                transition: width 0.4s ease;
+            }}
+            .limit-bar-safe   {{ background: rgba(34,197,94,0.55); }}
+            .limit-bar-warn   {{ background: rgba(250,204,21,0.55); }}
+            .limit-bar-danger {{ background: rgba(239,68,68,0.65); }}
+            .limit-bar-text {{
+                position: absolute; inset: 0;
+                display: flex; align-items: center; justify-content: center;
+                font-size: 11px; color: #fff; font-weight: 600;
+            }}
+            .status-open {{
+                background: rgba(34,197,94,0.18); color: #86efac;
+            }}
+            .status-closed {{
+                background: rgba(148,163,184,0.18); color: #cbd5e1;
+            }}
             .pnl-pos     {{ color: #86efac; font-weight: 700; }}
             .pnl-neg     {{ color: #fca5a5; font-weight: 700; }}
             .live-dot {{
@@ -774,6 +908,52 @@ def dashboard(db: Session = Depends(get_db)):
                     <div class="hint">Rich per-trade view — full context on entry, TPs, stops, PnL</div>
                 </div>
                 {trade_cards_html if trade_cards_html else '<div class="empty">No live trades right now. Cards will appear here when a trade is active.</div>'}
+            </div>
+
+            <div class="panel">
+                <div class="panel-head">
+                    <div class="panel-title">💼 Accounts</div>
+                    <div class="hint">Broker connections with today's realized PnL + daily loss limit tracking</div>
+                </div>
+                {f'''
+                <table>
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>Name</th>
+                            <th>Broker</th>
+                            <th>Env</th>
+                            <th>Account ID</th>
+                            <th>Mult</th>
+                            <th>Today Realized</th>
+                            <th>Daily Loss Used</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>{accounts_html}</tbody>
+                </table>
+                ''' if _all_accounts else '<div class="empty">No accounts configured yet. POST to <code>/api/accounts</code> to add your first broker account.</div>'}
+            </div>
+
+            <div class="panel">
+                <div class="panel-head">
+                    <div class="panel-title">👥 Groups</div>
+                    <div class="hint">Fan-out targets — one Pine signal → all active members with per-account multipliers</div>
+                </div>
+                {f'''
+                <table>
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>Name</th>
+                            <th>Description</th>
+                            <th>Members</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>{groups_html}</tbody>
+                </table>
+                ''' if _all_groups else '<div class="empty">No groups yet. POST to <code>/api/groups</code> to create one, then add members via <code>/api/groups/{{id}}/members</code>.</div>'}
             </div>
 
             <div class="panel">
@@ -1198,11 +1378,67 @@ def webhook(data: TradeEngineWebhook, db: Session = Depends(get_db)):
                 "ticker": existing.ticker,
             }
 
-    # ---- Phase 2: stateful execution ------------------------------------
-    # The executor reads + mutates the Position row in this session. We
-    # commit signal + position together at the end so a single transaction
-    # represents the whole event.
-    execution_result = execute_trade(data, db)
+    # ---- Phase 1.1: fan-out to group members (opt-in) -------------------
+    # When the webhook payload includes group=<name>, we look up that
+    # group's active members and run execute_trade once per member — each
+    # with its own trade_id suffix so their state machines don't collide.
+    # Backward-compat: when group is None, we run the classic single-
+    # position path below.
+    if getattr(data, "group", None):
+        group_obj = db.query(Group).filter(Group.name == data.group, Group.active.is_(True)).first()
+        if not group_obj:
+            raise HTTPException(status_code=404, detail=f"group '{data.group}' not found or inactive")
+        members = [m for m in group_obj.members if m.active and m.account and m.account.active]
+        if not members:
+            raise HTTPException(status_code=400, detail=f"group '{data.group}' has no active members")
+
+        leg_results: list[dict] = []
+        base_trade_id = data.trade_id
+        base_event_id = data.event_id
+        base_qty = data.qty
+
+        for m in sorted(members, key=lambda x: x.priority):
+            acct = m.account
+            # Effective size = base * account.multiplier * member.multiplier
+            eff_qty = max(1, int(round(base_qty * (acct.multiplier or 1.0) * (m.multiplier or 1.0))))
+            # Per-account trade_id + event_id so each leg's state machine is
+            # independent. Same base id → easy to link legs on dashboard.
+            leg_trade_id = f"{base_trade_id}#acc{acct.id}"
+            leg_event_id = f"{base_event_id}#acc{acct.id}" if base_event_id else None
+
+            # Build a per-leg signal by cloning payload + overriding fields.
+            leg_payload = data.model_dump()
+            leg_payload.update({
+                "qty": eff_qty,
+                "trade_id": leg_trade_id,
+                "event_id": leg_event_id,
+            })
+            leg_signal = TradeEngineWebhook(**leg_payload)
+
+            try:
+                leg_result = execute_trade(leg_signal, db, account=acct, group_name=group_obj.name)
+            except Exception as e:
+                leg_result = {"status": "error", "action": "leg_failed", "error": str(e),
+                              "account_id": acct.id, "account_name": acct.name}
+            leg_result["account_id"] = acct.id
+            leg_result["account_name"] = acct.name
+            leg_result["leg_qty"] = eff_qty
+            leg_result["leg_trade_id"] = leg_trade_id
+            leg_results.append(leg_result)
+
+        execution_result = {
+            "status": "executed_fan_out",
+            "action": "fan_out",
+            "group": group_obj.name,
+            "leg_count": len(leg_results),
+            "legs": leg_results,
+        }
+    else:
+        # ---- Phase 2: stateful execution (single-broker path) -----------
+        # No group specified. Use the default broker from get_broker() and
+        # spawn one Position row. This is the backward-compat path that
+        # matches how the server behaved before Phase 1.1.
+        execution_result = execute_trade(data, db)
 
     signal = WebhookSignal(
         event=data.event,
@@ -1390,3 +1626,265 @@ def list_stop_updates_for_trade(trade_id: str, db: Session = Depends(get_db)):
         .all()
     )
     return [_stop_update_to_dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Phase 1.1: Accounts + Groups admin API
+# ---------------------------------------------------------------------------
+# These endpoints manage the multi-account fan-out config. Auth is via
+# the same USER_KEY env var used for the webhook — passed as a query
+# param or header on admin requests. Simple bearer-token style so we
+# don't need a full auth system for the personal-use phase.
+
+def _admin_check(key: Optional[str]) -> None:
+    expected = os.getenv("USER_KEY", "trading123")
+    if key != expected:
+        raise HTTPException(status_code=401, detail="Invalid admin key")
+
+
+class AccountCreate(BaseModel):
+    name: str
+    broker: str                                        # one of BROKER_KINDS
+    account_id: Optional[str] = None
+    env: str = "demo"
+    multiplier: float = 1.0
+    daily_loss_limit: float = 0.0
+    active: bool = True
+    paused: bool = False
+    config: Optional[dict] = None
+
+
+class AccountUpdate(BaseModel):
+    name: Optional[str] = None
+    account_id: Optional[str] = None
+    env: Optional[str] = None
+    multiplier: Optional[float] = None
+    daily_loss_limit: Optional[float] = None
+    active: Optional[bool] = None
+    paused: Optional[bool] = None
+    config: Optional[dict] = None
+
+
+class GroupCreate(BaseModel):
+    name: str
+    description: Optional[str] = None
+    active: bool = True
+
+
+class GroupUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    active: Optional[bool] = None
+
+
+class GroupMemberCreate(BaseModel):
+    account_id: int
+    multiplier: float = 1.0
+    priority: int = 0
+    active: bool = True
+
+
+class GroupMemberUpdate(BaseModel):
+    multiplier: Optional[float] = None
+    priority: Optional[int] = None
+    active: Optional[bool] = None
+
+
+def _account_to_dict(a: Account) -> dict:
+    return {
+        "id": a.id,
+        "name": a.name,
+        "broker": a.broker,
+        "account_id": a.account_id,
+        "env": a.env,
+        "multiplier": a.multiplier,
+        "daily_loss_limit": a.daily_loss_limit,
+        "active": a.active,
+        "paused": a.paused,
+        "config": a.config,
+        "created_at": a.created_at,
+        "updated_at": a.updated_at,
+    }
+
+
+def _group_to_dict(g: Group, include_members: bool = True) -> dict:
+    out = {
+        "id": g.id,
+        "name": g.name,
+        "description": g.description,
+        "active": g.active,
+        "created_at": g.created_at,
+        "updated_at": g.updated_at,
+    }
+    if include_members:
+        out["members"] = [_gm_to_dict(m) for m in g.members]
+    return out
+
+
+def _gm_to_dict(m: GroupMember) -> dict:
+    return {
+        "id": m.id,
+        "group_id": m.group_id,
+        "account_id": m.account_id,
+        "account_name": m.account.name if m.account else None,
+        "multiplier": m.multiplier,
+        "priority": m.priority,
+        "active": m.active,
+    }
+
+
+@app.get("/api/accounts")
+def list_accounts(db: Session = Depends(get_db)):
+    """Public list — no admin key required, just don't expose secrets."""
+    accounts = db.query(Account).order_by(Account.id.asc()).all()
+    return [_account_to_dict(a) for a in accounts]
+
+
+@app.post("/api/accounts")
+def create_account(data: AccountCreate, key: str = "", db: Session = Depends(get_db)):
+    _admin_check(key)
+    if data.broker not in BROKER_KINDS:
+        raise HTTPException(status_code=400, detail=f"broker must be one of {BROKER_KINDS}")
+    a = Account(
+        name=data.name,
+        broker=data.broker,
+        account_id=data.account_id,
+        env=data.env,
+        multiplier=data.multiplier,
+        daily_loss_limit=data.daily_loss_limit,
+        active=data.active,
+        paused=data.paused,
+        config=data.config,
+    )
+    db.add(a)
+    db.commit()
+    db.refresh(a)
+    return _account_to_dict(a)
+
+
+@app.patch("/api/accounts/{account_id}")
+def update_account(account_id: int, data: AccountUpdate, key: str = "", db: Session = Depends(get_db)):
+    _admin_check(key)
+    a = db.query(Account).filter(Account.id == account_id).first()
+    if not a:
+        raise HTTPException(status_code=404, detail="account not found")
+    for field in ("name", "account_id", "env", "multiplier", "daily_loss_limit",
+                   "active", "paused", "config"):
+        v = getattr(data, field)
+        if v is not None:
+            setattr(a, field, v)
+    db.commit()
+    db.refresh(a)
+    return _account_to_dict(a)
+
+
+@app.delete("/api/accounts/{account_id}")
+def delete_account(account_id: int, key: str = "", db: Session = Depends(get_db)):
+    _admin_check(key)
+    a = db.query(Account).filter(Account.id == account_id).first()
+    if not a:
+        raise HTTPException(status_code=404, detail="account not found")
+    db.delete(a)
+    db.commit()
+    return {"deleted": True, "id": account_id}
+
+
+@app.get("/api/groups")
+def list_groups(db: Session = Depends(get_db)):
+    groups = db.query(Group).order_by(Group.id.asc()).all()
+    return [_group_to_dict(g) for g in groups]
+
+
+@app.post("/api/groups")
+def create_group(data: GroupCreate, key: str = "", db: Session = Depends(get_db)):
+    _admin_check(key)
+    if db.query(Group).filter(Group.name == data.name).first():
+        raise HTTPException(status_code=409, detail=f"group '{data.name}' already exists")
+    g = Group(name=data.name, description=data.description, active=data.active)
+    db.add(g)
+    db.commit()
+    db.refresh(g)
+    return _group_to_dict(g)
+
+
+@app.patch("/api/groups/{group_id}")
+def update_group(group_id: int, data: GroupUpdate, key: str = "", db: Session = Depends(get_db)):
+    _admin_check(key)
+    g = db.query(Group).filter(Group.id == group_id).first()
+    if not g:
+        raise HTTPException(status_code=404, detail="group not found")
+    for field in ("name", "description", "active"):
+        v = getattr(data, field)
+        if v is not None:
+            setattr(g, field, v)
+    db.commit()
+    db.refresh(g)
+    return _group_to_dict(g)
+
+
+@app.delete("/api/groups/{group_id}")
+def delete_group(group_id: int, key: str = "", db: Session = Depends(get_db)):
+    _admin_check(key)
+    g = db.query(Group).filter(Group.id == group_id).first()
+    if not g:
+        raise HTTPException(status_code=404, detail="group not found")
+    db.delete(g)
+    db.commit()
+    return {"deleted": True, "id": group_id}
+
+
+@app.post("/api/groups/{group_id}/members")
+def add_group_member(group_id: int, data: GroupMemberCreate, key: str = "", db: Session = Depends(get_db)):
+    _admin_check(key)
+    g = db.query(Group).filter(Group.id == group_id).first()
+    if not g:
+        raise HTTPException(status_code=404, detail="group not found")
+    a = db.query(Account).filter(Account.id == data.account_id).first()
+    if not a:
+        raise HTTPException(status_code=404, detail="account not found")
+    # Enforce unique (group_id, account_id) pair
+    existing = (
+        db.query(GroupMember)
+        .filter(GroupMember.group_id == group_id, GroupMember.account_id == data.account_id)
+        .first()
+    )
+    if existing:
+        raise HTTPException(status_code=409, detail="account already in this group")
+    m = GroupMember(
+        group_id=group_id,
+        account_id=data.account_id,
+        multiplier=data.multiplier,
+        priority=data.priority,
+        active=data.active,
+    )
+    db.add(m)
+    db.commit()
+    db.refresh(m)
+    return _gm_to_dict(m)
+
+
+@app.patch("/api/groups/{group_id}/members/{member_id}")
+def update_group_member(group_id: int, member_id: int, data: GroupMemberUpdate,
+                        key: str = "", db: Session = Depends(get_db)):
+    _admin_check(key)
+    m = db.query(GroupMember).filter(GroupMember.id == member_id, GroupMember.group_id == group_id).first()
+    if not m:
+        raise HTTPException(status_code=404, detail="member not found")
+    for field in ("multiplier", "priority", "active"):
+        v = getattr(data, field)
+        if v is not None:
+            setattr(m, field, v)
+    db.commit()
+    db.refresh(m)
+    return _gm_to_dict(m)
+
+
+@app.delete("/api/groups/{group_id}/members/{member_id}")
+def delete_group_member(group_id: int, member_id: int, key: str = "", db: Session = Depends(get_db)):
+    _admin_check(key)
+    m = db.query(GroupMember).filter(GroupMember.id == member_id, GroupMember.group_id == group_id).first()
+    if not m:
+        raise HTTPException(status_code=404, detail="member not found")
+    db.delete(m)
+    db.commit()
+    return {"deleted": True, "id": member_id}

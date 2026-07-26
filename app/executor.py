@@ -118,13 +118,25 @@ _TERMINAL = {"CLOSED", "CANCELLED"}
 _ACTIVE = {"OPEN", "PARTIAL", "PENDING"}
 
 
-def execute_trade(signal, db: Session | None = None, *, observe_only: bool = False) -> dict[str, Any]:
+def execute_trade(signal, db: Session | None = None, *,
+                  observe_only: bool = False,
+                  account=None,           # Account row, when routing to a specific fan-out target
+                  group_name=None,        # Group name that owned this fan-out (stored on Position)
+                  ) -> dict[str, Any]:
     """Run the state machine + (unless observe_only) drive the broker.
 
     observe_only=True forces SimulatedAdapter regardless of the active
     broker — used by the /api/webhook/pmt-compat endpoint so that
     secondary "observability" alerts can never accidentally place real
     orders even if env vars later activate PMT/TradeSyncer/Tradovate.
+
+    account/group_name are set by the webhook handler's fan-out loop
+    (one call per group member). When account is provided:
+      - We look up an account-specific broker adapter via that account's
+        broker kind (falls back to get_broker() for now — full per-
+        account broker resolution comes in a later slice).
+      - Position row is tagged with account_id + group_name so the
+        dashboard can filter/aggregate per account and per group.
     """
     event = (signal.event or "").upper()
     trade_id = getattr(signal, "trade_id", None)
@@ -137,9 +149,17 @@ def execute_trade(signal, db: Session | None = None, *, observe_only: bool = Fal
         # Hard guarantee: this signal CANNOT touch a real broker.
         from .brokers.simulated import SimulatedAdapter
         broker = SimulatedAdapter()
+    elif account is not None and (not account.active or account.paused):
+        # Account is disabled/paused → observe-only for this fan-out leg.
+        from .brokers.simulated import SimulatedAdapter
+        broker = SimulatedAdapter()
     else:
         broker = get_broker()
     broker_name = f"{broker.name}-{broker.env}" if broker.env not in ("sim", "unknown") else broker.name
+    if account is not None:
+        # Prefer the account's own name so the dashboard shows
+        # "Lucid 50K" instead of just "simulated".
+        broker_name = f"{account.broker}:{account.name}"
 
     position = (
         db.query(Position).filter(Position.trade_id == trade_id).first()
@@ -166,6 +186,8 @@ def execute_trade(signal, db: Session | None = None, *, observe_only: bool = Fal
                 stop_source="BASE",
                 status="OPEN",
                 broker=broker_name,
+                account_id=account.id if account is not None else None,
+                group_name=group_name,
             )
             db.add(position)
             db.flush()

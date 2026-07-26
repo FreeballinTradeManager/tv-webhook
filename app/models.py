@@ -1,5 +1,6 @@
-from sqlalchemy import Column, Integer, String, DateTime, Text, Float
+from sqlalchemy import Column, Integer, String, DateTime, Text, Float, Boolean, ForeignKey, JSON
 from sqlalchemy.sql import func
+from sqlalchemy.orm import relationship
 from .db import Base
 
 
@@ -84,6 +85,15 @@ class Position(Base):
     # dashboard. Cleared on next successful broker call.
     broker_error = Column(String, nullable=True)
 
+    # Phase 1.1: which account this position was placed on (fan-out).
+    # NULL on legacy rows created before the accounts table existed —
+    # those get treated as belonging to a default "unassigned" bucket
+    # in the dashboard.
+    account_id = Column(Integer, ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True, index=True)
+    # Which group's fan-out spawned this Position (e.g. "MainGroup").
+    # NULL when the signal wasn't routed through a group.
+    group_name = Column(String, nullable=True, index=True)
+
 
 # ---------------------------------------------------------------------------
 # Phase 2.5: stop-update ledger
@@ -103,3 +113,114 @@ class StopUpdate(Base):
     new_stop = Column(Float, nullable=False)
     source = Column(String, nullable=True)   # BE / JUMP / TRAIL / RESYNC / etc.
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+# ---------------------------------------------------------------------------
+# Phase 1.1: Accounts + Groups — multi-account fan-out
+# ---------------------------------------------------------------------------
+# One Account = one broker connection.
+# One Group  = a fan-out target (master + slaves logically — the "master"
+#              concept lives at the copy service level, we just fan out to
+#              every active member).
+# One Position row per (trade_id, account_id).
+#
+# Signal arrives → look up group by name → for each active GroupMember,
+# apply the group_member.multiplier, spawn a Position for that account,
+# route to the account's broker adapter.
+
+BROKER_KINDS = (
+    "simulated",     # observability only, no real orders
+    "pmt",           # PickMyTrade webhook
+    "tradesyncer",   # TradeSyncer webhook
+    "tradovate",     # direct Tradovate REST + WS (personal only)
+    "mt5",           # MT5 bridge (self-hosted)
+    "ibkr",          # Interactive Brokers Client Portal API
+    "oanda",         # OANDA REST API
+    "tradersport",   # TradersPost webhook
+)
+
+
+class Account(Base):
+    __tablename__ = "accounts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)                  # display label, e.g. "Lucid 50K"
+    broker = Column(String, nullable=False, index=True)    # BROKER_KINDS
+    account_id = Column(String, nullable=True)             # broker-side account identifier
+    env = Column(String, nullable=False, default="demo")   # "demo" | "live"
+
+    # Per-account default sizing multiplier applied on fan-out. GroupMember
+    # multiplier overrides this when the account is in a group.
+    multiplier = Column(Float, nullable=False, default=1.0)
+
+    # Blow-up protection. Server enforces: if realized_pnl for today on this
+    # account <= -daily_loss_limit, subsequent orders are blocked until
+    # reset. 0 = no limit.
+    daily_loss_limit = Column(Float, nullable=False, default=0.0)
+
+    # Toggles
+    active = Column(Boolean, nullable=False, default=True)   # false = fully off
+    paused = Column(Boolean, nullable=False, default=False)  # true = skip orders but keep tracking
+
+    # Broker-specific config (webhook URLs, tokens etc.). Kept as JSON so
+    # each broker can carry different fields without schema churn.
+    # Sensitive fields (tokens, passwords) are typically stored in Railway
+    # env vars, not here — this JSON is for non-secret settings like
+    # symbol maps and lot conversions.
+    config = Column(JSON, nullable=True)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    group_memberships = relationship(
+        "GroupMember",
+        back_populates="account",
+        cascade="all, delete-orphan",
+    )
+
+
+class Group(Base):
+    __tablename__ = "groups"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False, unique=True, index=True)
+    description = Column(Text, nullable=True)
+    active = Column(Boolean, nullable=False, default=True)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    members = relationship(
+        "GroupMember",
+        back_populates="group",
+        cascade="all, delete-orphan",
+    )
+
+
+class GroupMember(Base):
+    __tablename__ = "group_members"
+
+    id = Column(Integer, primary_key=True, index=True)
+    group_id = Column(Integer, ForeignKey("groups.id", ondelete="CASCADE"), nullable=False, index=True)
+    account_id = Column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False, index=True)
+
+    # Override the account's default multiplier for this group. 1.0 = same.
+    multiplier = Column(Float, nullable=False, default=1.0)
+    # Execution priority. Lower first. 0 = default (executed in insertion order).
+    priority = Column(Integer, nullable=False, default=0)
+
+    active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    group = relationship("Group", back_populates="members")
+    account = relationship("Account", back_populates="group_memberships")
