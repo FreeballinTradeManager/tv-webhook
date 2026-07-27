@@ -18,7 +18,7 @@ from .db import get_db, run_migrations
 from . import models  # noqa: F401
 from .models import (
     WebhookSignal, Position, StopUpdate, Account, Group, GroupMember, BROKER_KINDS,
-    Strategy, TradeAlert, UserSettings, Goal,
+    Strategy, TradeAlert, UserSettings, Goal, VaultEntry,
 )
 from .executor import execute_trade
 from .ws import manager as ws_manager
@@ -3177,6 +3177,139 @@ def delete_goal(gid: int, key: str = "", db: Session = Depends(get_db)):
     if not g: raise HTTPException(status_code=404, detail="goal not found")
     db.delete(g); db.commit()
     return {"deleted": True, "id": gid}
+
+
+# ----- Password Vault (task #148) ------------------------------------------
+# Encrypted store for prop firm portal + broker + TradingView logins.
+# Passwords are Fernet-encrypted at rest with VAULT_KEY env var.
+# List endpoints never leak decrypted passwords — only /reveal does,
+# and it requires admin key.
+
+def _vault_fernet():
+    """Lazy-init Fernet cipher. If VAULT_KEY isn't set, we mint an
+    ephemeral one at boot + log a warning (dev mode — entries won't
+    survive restarts). In prod, set VAULT_KEY once + keep it stable."""
+    from cryptography.fernet import Fernet
+    key = os.getenv("VAULT_KEY")
+    if not key:
+        # Dev fallback — regenerated each restart, so entries stored
+        # this session can't be decrypted after a redeploy.
+        if not hasattr(app.state, "_vault_ephemeral_key"):
+            app.state._vault_ephemeral_key = Fernet.generate_key().decode()
+            log.warning("VAULT_KEY env var not set — using ephemeral key "
+                        "(entries won't decrypt after restart). Set VAULT_KEY "
+                        "in Railway env for persistence.")
+        key = app.state._vault_ephemeral_key
+    if isinstance(key, str):
+        key = key.encode()
+    return Fernet(key)
+
+
+def _encrypt_pw(plaintext: Optional[str]) -> Optional[str]:
+    if not plaintext:
+        return None
+    return _vault_fernet().encrypt(plaintext.encode()).decode()
+
+
+def _decrypt_pw(ciphertext: Optional[str]) -> Optional[str]:
+    if not ciphertext:
+        return None
+    try:
+        return _vault_fernet().decrypt(ciphertext.encode()).decode()
+    except Exception as e:
+        log.warning("vault decrypt failed: %s", e)
+        return None
+
+
+class VaultIn(BaseModel):
+    label: str
+    category: Optional[str] = "prop_firm"
+    url: Optional[str] = None
+    username: Optional[str] = None
+    password: Optional[str] = None                 # plaintext in; stored encrypted
+    notes: Optional[str] = None
+    is_favorite: Optional[bool] = False
+    account_id: Optional[int] = None
+
+
+class VaultPatch(BaseModel):
+    label: Optional[str] = None
+    category: Optional[str] = None
+    url: Optional[str] = None
+    username: Optional[str] = None
+    password: Optional[str] = None                 # if provided, re-encrypt
+    notes: Optional[str] = None
+    is_favorite: Optional[bool] = None
+    account_id: Optional[int] = None
+
+
+def _vault_to_dict(v: VaultEntry, include_password: bool = False) -> dict:
+    d = {
+        "id": v.id, "label": v.label, "category": v.category,
+        "url": v.url, "username": v.username,
+        "has_password": bool(v.encrypted_password),
+        "notes": v.notes, "is_favorite": v.is_favorite,
+        "account_id": v.account_id,
+        "last_used_at": v.last_used_at.isoformat() if v.last_used_at else None,
+        "created_at": v.created_at.isoformat() if v.created_at else None,
+    }
+    if include_password:
+        d["password"] = _decrypt_pw(v.encrypted_password)
+    return d
+
+
+@app.get("/api/vault")
+def list_vault(db: Session = Depends(get_db)):
+    """List vault entries — passwords are NEVER included here. Frontend
+    shows the label + username + masked password (••••). Call /reveal
+    to get the plaintext for a specific entry."""
+    return [_vault_to_dict(v) for v in
+            db.query(VaultEntry).order_by(VaultEntry.is_favorite.desc(), VaultEntry.id.desc()).all()]
+
+
+@app.post("/api/vault")
+def create_vault(data: VaultIn, key: str = "", db: Session = Depends(get_db)):
+    _admin_check(key)
+    payload = data.dict(exclude_unset=True)
+    plaintext = payload.pop("password", None)
+    v = VaultEntry(**payload, encrypted_password=_encrypt_pw(plaintext))
+    db.add(v); db.commit(); db.refresh(v)
+    return _vault_to_dict(v)
+
+
+@app.patch("/api/vault/{vid}")
+def update_vault(vid: int, data: VaultPatch, key: str = "", db: Session = Depends(get_db)):
+    _admin_check(key)
+    v = db.query(VaultEntry).filter(VaultEntry.id == vid).first()
+    if not v: raise HTTPException(status_code=404, detail="vault entry not found")
+    payload = data.dict(exclude_unset=True)
+    if "password" in payload:
+        v.encrypted_password = _encrypt_pw(payload.pop("password"))
+    for k, val in payload.items():
+        setattr(v, k, val)
+    db.commit(); db.refresh(v)
+    return _vault_to_dict(v)
+
+
+@app.delete("/api/vault/{vid}")
+def delete_vault(vid: int, key: str = "", db: Session = Depends(get_db)):
+    _admin_check(key)
+    v = db.query(VaultEntry).filter(VaultEntry.id == vid).first()
+    if not v: raise HTTPException(status_code=404, detail="vault entry not found")
+    db.delete(v); db.commit()
+    return {"deleted": True, "id": vid}
+
+
+@app.get("/api/vault/{vid}/reveal")
+def reveal_vault(vid: int, key: str = "", db: Session = Depends(get_db)):
+    """Returns the decrypted password for one entry. Requires admin key
+    — auditable in server logs (task #100). Bumps last_used_at."""
+    _admin_check(key)
+    v = db.query(VaultEntry).filter(VaultEntry.id == vid).first()
+    if not v: raise HTTPException(status_code=404, detail="vault entry not found")
+    v.last_used_at = datetime.now(timezone.utc)
+    db.commit()
+    return _vault_to_dict(v, include_password=True)
 
 
 # ----- Reconciliation / Broker Sync Verification ---------------------------

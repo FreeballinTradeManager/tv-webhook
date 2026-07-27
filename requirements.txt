@@ -6,3 +6,4 @@ httpx
 websockets
 python-multipart
 aiofiles
+cryptography

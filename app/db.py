@@ -148,6 +148,9 @@ MIGRATIONS = [
     "ALTER TABLE strategies ADD COLUMN IF NOT EXISTS alert_json_template TEXT",
     "ALTER TABLE strategies ADD COLUMN IF NOT EXISTS alert_description TEXT",
 
+    # Task #148: password vault table auto-created by Base.metadata.create_all.
+    # Nothing to seed.
+
     # Phase 2.1b: extend positions with Base44 Trade shape fields so we can
     # serve /api/trades from the same table. Nullable — legacy positions
     # keep working.

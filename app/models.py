@@ -372,6 +372,42 @@ class TradeAlert(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
+class VaultEntry(Base):
+    """Task #148: encrypted password vault. Stores prop firm portal
+    credentials, broker web logins, TradingView passwords, etc. so
+    the trader doesn't have to jump between password managers.
+
+    Passwords are Fernet-encrypted at rest using VAULT_KEY env var.
+    List endpoints NEVER return the decrypted password — only masked
+    metadata. Explicit /reveal endpoint returns plaintext (requires
+    admin key).
+    """
+    __tablename__ = "vault_entries"
+
+    id = Column(Integer, primary_key=True, index=True)
+    label = Column(String, nullable=False)                 # "FTMO 100K Challenge"
+    category = Column(String, nullable=False, default="prop_firm")
+    # prop_firm / broker / tradingview / exchange / email / other
+    url = Column(String, nullable=True)                    # https://ftmo.com/login
+    username = Column(String, nullable=True)
+    encrypted_password = Column(Text, nullable=True)       # Fernet ciphertext
+    notes = Column(Text, nullable=True)                    # 2FA method, security Qs, etc.
+    is_favorite = Column(Boolean, nullable=False, default=False)
+
+    # Which broker + account this vault entry powers (optional link).
+    # Lets us surface the right login on an Account card.
+    account_id = Column(Integer, ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True)
+
+    last_used_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
 class Goal(Base):
     """User-defined profit target. Powers Dashboard hero progress bars.
     Task #51 — 'Hit $500 today' style goals.
