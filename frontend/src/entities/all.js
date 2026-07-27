@@ -22,6 +22,12 @@ function makeEntity(basePath) {
 }
 
 export const Account = makeEntity('/api/accounts')
+export const Group = {
+  ...makeEntity('/api/groups'),
+  addMember: (groupId, payload) => api(`/api/groups/${groupId}/members`, { method: 'POST', body: payload }),
+  updateMember: (groupId, memberId, payload) => api(`/api/groups/${groupId}/members/${memberId}`, { method: 'PATCH', body: payload }),
+  deleteMember: (groupId, memberId) => api(`/api/groups/${groupId}/members/${memberId}`, { method: 'DELETE' }),
+}
 export const Trade = makeEntity('/api/trades')
 export const Strategy = {
   ...makeEntity('/api/strategies'),

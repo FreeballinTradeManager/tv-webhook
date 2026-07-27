@@ -13,7 +13,8 @@ import {
   BarChart3,
   Rewind,
   KeyRound,
-  Activity
+  Activity,
+  Repeat
 } from "lucide-react";
 import {
   Sidebar,
@@ -38,6 +39,7 @@ const navigationItems = [
   { title: "Risk Calculator", url: createPageUrl("RiskCalculator"), icon: Calculator },
   { title: "Backtester", url: createPageUrl("Backtester"), icon: Rewind },
   { title: "Accounts", url: createPageUrl("Accounts"), icon: Wallet },
+  { title: "Rotation", url: createPageUrl("Rotation"), icon: Repeat },
   { title: "Analytics", url: createPageUrl("Analytics"), icon: BarChart3 },
   { title: "Strategies", url: createPageUrl("Strategies"), icon: BookOpen },
   { title: "Alerts", url: createPageUrl("Alerts"), icon: Bell },
