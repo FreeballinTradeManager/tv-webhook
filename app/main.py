@@ -999,12 +999,32 @@ def dashboard(db: Session = Depends(get_db)):
         </style>
     </head>
     <body>
-        <div class="wrap">
-            <div class="hero">
-                <div class="eyebrow">Freeballin</div>
-                <h1>Trade Engine Dashboard</h1>
-                <div class="sub"><span id="live-dot" class="live-dot"></span><span id="live-text">Live — auto-updating</span> · stateful webhook engine, Phase 3a</div>
+        <!-- Sticky top nav — quick jump between panels -->
+        <div class="topnav">
+            <div class="topnav-inner">
+                <div class="topnav-brand">
+                    <span class="topnav-logo">🎯</span>
+                    <span class="topnav-title">Trade Engine</span>
+                    <span id="live-dot" class="live-dot"></span>
+                    <span id="live-text" class="hint">Live</span>
+                </div>
+                <div class="topnav-links">
+                    <a href="#overview">Overview</a>
+                    <a href="#accounts">Accounts</a>
+                    <a href="#groups">Groups</a>
+                    <a href="#trades">Live Trades</a>
+                    <a href="#positions">Positions</a>
+                    <a href="#history">History</a>
+                    <a href="/docs" target="_blank" class="topnav-external">API Docs ↗</a>
+                </div>
+            </div>
+        </div>
 
+        <div class="wrap">
+            <!-- OVERVIEW -->
+            <div class="hero" id="overview">
+                <div class="eyebrow">Freeballin · Trade Engine · Phase 1.3</div>
+                <h1>Trading Dashboard</h1>
                 <div class="stats">
                     <div class="card">
                         <div class="card-label">Signals Logged</div>
@@ -1022,23 +1042,34 @@ def dashboard(db: Session = Depends(get_db)):
                         <div class="card-label">Broker</div>
                         <div class="card-value" style="font-size:18px;">{get_broker().name.title()} · <span style="opacity:.7">{get_broker().env}</span></div>
                     </div>
+                    <div class="card">
+                        <div class="card-label">Accounts</div>
+                        <div class="card-value">{sum(1 for a in _all_accounts if a.state == 'active')} <span class="hint" style="font-size:14px;">active / {len(_all_accounts)} total</span></div>
+                    </div>
+                    <div class="card">
+                        <div class="card-label">Groups</div>
+                        <div class="card-value">{sum(1 for g in _all_groups if g.active)} <span class="hint" style="font-size:14px;">active</span></div>
+                    </div>
                 </div>
             </div>
 
-            <div class="panel">
-                <div class="panel-head">
-                    <div class="panel-title">🎯 Live Trades</div>
-                    <div class="hint">Rich per-trade view — full context on entry, TPs, stops, PnL</div>
-                </div>
-                {trade_cards_html if trade_cards_html else '<div class="empty">No live trades right now. Cards will appear here when a trade is active.</div>'}
+            <!-- SECTION 1: MANAGEMENT (Accounts + Groups) — controls live at the top -->
+            <div class="section-header">
+                <h2>⚙ Management</h2>
+                <span class="hint">Configure broker accounts and fan-out groups</span>
             </div>
 
-            <div class="panel">
+            <div class="panel" id="accounts">
                 <div class="panel-head">
                     <div class="panel-title">💼 Accounts</div>
-                    <div class="hint">Broker connections with today's realized PnL + daily loss limit tracking</div>
+                    <div class="panel-actions">
+                        <span class="hint">Broker connections with rotation state + today's PnL</span>
+                        <button class="btn-mini" onclick="togglePanel('accounts')">Collapse</button>
+                    </div>
                 </div>
+                <div class="panel-body">
                 {f'''
+                <div class="table-wrap">
                 <table>
                     <thead>
                         <tr>
@@ -1057,22 +1088,29 @@ def dashboard(db: Session = Depends(get_db)):
                     </thead>
                     <tbody>{accounts_html}</tbody>
                 </table>
-                ''' if _all_accounts else '<div class="empty">No accounts configured yet. POST to <code>/api/accounts</code> to add your first broker account.</div>'}
+                </div>
+                ''' if _all_accounts else '<div class="empty">No accounts yet. <code>POST /api/accounts?key=trading123</code> to add one.</div>'}
+                </div>
             </div>
 
-            <div class="panel">
+            <div class="panel" id="groups">
                 <div class="panel-head">
                     <div class="panel-title">👥 Groups</div>
-                    <div class="hint">Fan-out targets — one Pine signal → all active members with per-account multipliers</div>
+                    <div class="panel-actions">
+                        <span class="hint">Fan-out targets · one Pine signal → all active members</span>
+                        <button class="btn-mini" onclick="togglePanel('groups')">Collapse</button>
+                    </div>
                 </div>
+                <div class="panel-body">
                 {f'''
+                <div class="table-wrap">
                 <table>
                     <thead>
                         <tr>
                             <th>ID</th>
                             <th>Name</th>
                             <th>Description</th>
-                            <th>Members</th>
+                            <th>Members (state)</th>
                             <th>Rotation → Cascade</th>
                             <th>Status</th>
                             <th></th>
@@ -1080,15 +1118,47 @@ def dashboard(db: Session = Depends(get_db)):
                     </thead>
                     <tbody>{groups_html}</tbody>
                 </table>
-                ''' if _all_groups else '<div class="empty">No groups yet. POST to <code>/api/groups</code> to create one, then add members via <code>/api/groups/{{id}}/members</code>.</div>'}
+                </div>
+                ''' if _all_groups else '<div class="empty">No groups yet. <code>POST /api/groups?key=trading123</code> to create one.</div>'}
+                </div>
             </div>
 
-            <div class="panel">
+            <!-- SECTION 2: LIVE TRADES — the main event -->
+            <div class="section-header">
+                <h2>🎯 Live Trades</h2>
+                <span class="hint">Rich per-trade view · full context on entry, TPs, stops, PnL</span>
+            </div>
+
+            <div class="panel" id="trades">
+                <div class="panel-head">
+                    <div class="panel-title">Active trade cards</div>
+                    <div class="panel-actions">
+                        <span class="hint">{len(active_positions)} open</span>
+                        <button class="btn-mini" onclick="togglePanel('trades')">Collapse</button>
+                    </div>
+                </div>
+                <div class="panel-body">
+                {trade_cards_html if trade_cards_html else '<div class="empty">No live trades right now.</div>'}
+                </div>
+            </div>
+
+            <!-- SECTION 3: POSITIONS (compact tables — Active + Closed) -->
+            <div class="section-header">
+                <h2>📊 Positions</h2>
+                <span class="hint">Compact table view of all positions past + present</span>
+            </div>
+
+            <div class="panel" id="positions">
                 <div class="panel-head">
                     <div class="panel-title">Active Positions</div>
-                    <div class="hint">PENDING · OPEN · PARTIAL — compact table view</div>
+                    <div class="panel-actions">
+                        <span class="hint">PENDING · OPEN · PARTIAL</span>
+                        <button class="btn-mini" onclick="togglePanel('positions')">Collapse</button>
+                    </div>
                 </div>
+                <div class="panel-body">
                 {f'''
+                <div class="table-wrap">
                 <table>
                     <thead>
                         <tr>
@@ -1109,15 +1179,22 @@ def dashboard(db: Session = Depends(get_db)):
                     </thead>
                     <tbody>{active_rows}</tbody>
                 </table>
+                </div>
                 ''' if active_positions else '<div class="empty">No active positions.</div>'}
+                </div>
             </div>
 
-            <div class="panel">
+            <div class="panel" id="closed">
                 <div class="panel-head">
                     <div class="panel-title">Closed Positions</div>
-                    <div class="hint">Last 25</div>
+                    <div class="panel-actions">
+                        <span class="hint">Last 25</span>
+                        <button class="btn-mini" onclick="togglePanel('closed')">Collapse</button>
+                    </div>
                 </div>
+                <div class="panel-body panel-body-collapsed">
                 {f'''
+                <div class="table-wrap">
                 <table>
                     <thead>
                         <tr>
@@ -1138,15 +1215,28 @@ def dashboard(db: Session = Depends(get_db)):
                     </thead>
                     <tbody>{closed_rows}</tbody>
                 </table>
+                </div>
                 ''' if closed_positions else '<div class="empty">No closed positions yet.</div>'}
+                </div>
             </div>
 
-            <div class="panel">
+            <!-- SECTION 4: HISTORY (Stop Updates + Signals — collapsed by default) -->
+            <div class="section-header">
+                <h2>📜 History</h2>
+                <span class="hint">Stop ledger + webhook signal log</span>
+            </div>
+
+            <div class="panel" id="history">
                 <div class="panel-head">
                     <div class="panel-title">Stop Updates</div>
-                    <div class="hint">Real-time ledger — BE · JUMP · TRAIL · RESYNC · MASTER · drag · last 50</div>
+                    <div class="panel-actions">
+                        <span class="hint">BE · JUMP · TRAIL · RESYNC · MASTER · drag — last 50</span>
+                        <button class="btn-mini" onclick="togglePanel('history')">Collapse</button>
+                    </div>
                 </div>
+                <div class="panel-body panel-body-collapsed">
                 {f'''
+                <div class="table-wrap">
                 <table>
                     <thead>
                         <tr>
@@ -1162,16 +1252,22 @@ def dashboard(db: Session = Depends(get_db)):
                     </thead>
                     <tbody>{stop_rows}</tbody>
                 </table>
+                </div>
                 ''' if recent_stop_updates else '<div class="empty">No stop updates yet.</div>'}
+                </div>
             </div>
 
-            <div class="panel">
+            <div class="panel" id="signals">
                 <div class="panel-head">
                     <div class="panel-title">Recent Signals</div>
-                    <div class="hint">Latest 50 webhook events</div>
+                    <div class="panel-actions">
+                        <span class="hint">Latest 50 webhook events</span>
+                        <button class="btn-mini" onclick="togglePanel('signals')">Collapse</button>
+                    </div>
                 </div>
-
+                <div class="panel-body panel-body-collapsed">
                 {f'''
+                <div class="table-wrap">
                 <table>
                     <thead>
                         <tr>
@@ -1189,13 +1285,17 @@ def dashboard(db: Session = Depends(get_db)):
                     </thead>
                     <tbody>{signal_rows}</tbody>
                 </table>
-                ''' if signals else '<div class="empty">No signals yet. Trigger a TradingView alert and refresh this page.</div>'}
+                </div>
+                ''' if signals else '<div class="empty">No signals yet.</div>'}
 
                 <div class="footer-links">
                     <a href="/docs">API Docs</a>
                     <a href="/api/signals">Raw Signals JSON</a>
                     <a href="/api/positions">Positions JSON</a>
                     <a href="/api/stop-updates">Stop Updates JSON</a>
+                    <a href="/api/accounts">Accounts JSON</a>
+                    <a href="/api/groups">Groups JSON</a>
+                </div>
                 </div>
             </div>
         </div>
