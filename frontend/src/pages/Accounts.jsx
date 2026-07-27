@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from "react";
 import { Account } from "@/entities/all";
+import { api } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Plus, Trash2, Edit } from "lucide-react";
+import { Plus, Trash2, Edit, Shield, ShieldAlert, Unlock } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -180,17 +181,67 @@ export default function AccountsPage() {
                   </div>
                   <p className="text-sm text-slate-400">{acc.broker_name || acc.broker || '—'}</p>
                 </CardHeader>
-                <CardContent className="space-y-2">
+                <CardContent className="space-y-3">
                   <div className="flex justify-between text-slate-300"><span>Current Balance</span> <span className="font-bold text-white">${(acc.current_balance ?? 0).toLocaleString()}</span></div>
                   <div className="flex justify-between text-slate-300"><span>Starting Balance</span> <span className="font-mono">${(acc.starting_balance ?? 0).toLocaleString()}</span></div>
-                   <div className="flex justify-between text-slate-300"><span>P&L</span> <span className={((acc.current_balance ?? 0) - (acc.starting_balance ?? 0)) >= 0 ? 'text-green-500' : 'text-red-500'}>${((acc.current_balance ?? 0) - (acc.starting_balance ?? 0)).toLocaleString()}</span></div>
-                  <div className="flex justify-between text-slate-300"><span>State</span> <Badge variant="outline" className={
-                    (acc.state === 'active' ? 'bg-green-500/10 text-green-400 border-green-500/30' :
-                     acc.state === 'benched' ? 'bg-yellow-500/10 text-yellow-400 border-yellow-500/30' :
-                     acc.state === 'cooled' ? 'bg-blue-500/10 text-blue-400 border-blue-500/30' :
-                     acc.state === 'stopped' ? 'bg-red-500/10 text-red-400 border-red-500/30' :
-                     'bg-slate-500/10 text-slate-400 border-slate-500/30')
-                  }>{acc.state || 'active'}</Badge></div>
+                  <div className="flex justify-between text-slate-300"><span>Total P&L</span> <span className={((acc.current_balance ?? 0) - (acc.starting_balance ?? 0)) >= 0 ? 'text-green-500' : 'text-red-500'}>${((acc.current_balance ?? 0) - (acc.starting_balance ?? 0)).toLocaleString()}</span></div>
+                  <div className="flex justify-between text-slate-300 pt-2 border-t border-slate-800"><span>Today's P&L</span> <span className={(acc.pnl_today ?? 0) >= 0 ? 'text-green-500 font-semibold' : 'text-red-500 font-semibold'}>${(acc.pnl_today ?? 0).toFixed(2)}</span></div>
+                  <div className="flex justify-between text-xs text-slate-400"><span>Wins today</span><span>{acc.wins_today ?? 0}W / {acc.losses_today ?? 0}L</span></div>
+
+                  {/* Guardian / Daily DD progress bar (task #52) */}
+                  {(acc.daily_loss_limit ?? 0) > 0 && (() => {
+                    const limit = acc.daily_loss_limit;
+                    const pnl = acc.pnl_today ?? 0;
+                    const pct = pnl < 0 ? Math.min(100, (Math.abs(pnl) / limit) * 100) : 0;
+                    const color = pct >= 80 ? 'bg-red-500' : pct >= 50 ? 'bg-yellow-500' : 'bg-green-500';
+                    const textColor = pct >= 80 ? 'text-red-400' : pct >= 50 ? 'text-yellow-400' : 'text-green-400';
+                    return (
+                      <div className="pt-2">
+                        <div className="flex justify-between text-xs mb-1">
+                          <span className="text-slate-400 flex items-center gap-1">
+                            {pct >= 80 ? <ShieldAlert className="w-3 h-3"/> : <Shield className="w-3 h-3"/>}
+                            Daily DD
+                          </span>
+                          <span className={textColor}>{pct.toFixed(0)}% of ${limit.toLocaleString()}</span>
+                        </div>
+                        <div className="h-2 bg-slate-800 rounded-full overflow-hidden">
+                          <div className={`h-full ${color} transition-all`} style={{width: `${pct}%`}}/>
+                        </div>
+                      </div>
+                    );
+                  })()}
+
+                  <div className="flex justify-between items-center text-slate-300 pt-2 border-t border-slate-800">
+                    <span className="text-xs">State</span>
+                    <Badge variant="outline" className={
+                      (acc.state === 'active' ? 'bg-green-500/10 text-green-400 border-green-500/30' :
+                       acc.state === 'benched' ? 'bg-yellow-500/10 text-yellow-400 border-yellow-500/30' :
+                       acc.state === 'cooled' ? 'bg-blue-500/10 text-blue-400 border-blue-500/30' :
+                       acc.state === 'stopped' ? 'bg-red-500/10 text-red-400 border-red-500/30' :
+                       'bg-slate-500/10 text-slate-400 border-slate-500/30')
+                    }>{acc.state || 'active'}</Badge>
+                  </div>
+
+                  {/* Reset Guardian button — shown only if account is stopped */}
+                  {acc.state === 'stopped' && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="w-full bg-orange-500/10 border-orange-500/30 text-orange-400 hover:bg-orange-500/20"
+                      onClick={async () => {
+                        if (window.confirm(`Reset Guardian on ${acc.name}? This clears the daily loss lock, sets state=active, and zeros today's P&L counters.`)) {
+                          try {
+                            await api(`/api/accounts/${acc.id}/reset-guardian`, { method: 'POST' });
+                            loadAccounts();
+                          } catch (e) {
+                            alert(`Reset failed: ${e.message}`);
+                          }
+                        }
+                      }}
+                    >
+                      <Unlock className="w-3 h-3 mr-2" />Reset Guardian
+                    </Button>
+                  )}
                 </CardContent>
                 <div className="p-4 flex justify-end gap-2 border-t border-slate-800">
                   <Button variant="ghost" size="icon" onClick={() => handleDelete(acc.id)}>
