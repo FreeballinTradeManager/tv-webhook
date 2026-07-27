@@ -11,7 +11,8 @@ import {
   Settings,
   PlusCircle,
   BarChart3,
-  Rewind
+  Rewind,
+  KeyRound
 } from "lucide-react";
 import {
   Sidebar,
@@ -38,6 +39,7 @@ const navigationItems = [
   { title: "Analytics", url: createPageUrl("Analytics"), icon: BarChart3 },
   { title: "Strategies", url: createPageUrl("Strategies"), icon: BookOpen },
   { title: "Alerts", url: createPageUrl("Alerts"), icon: Bell },
+  { title: "Vault", url: createPageUrl("Vault"), icon: KeyRound },
   { title: "Settings", url: createPageUrl("Settings"), icon: Settings },
 ];
 

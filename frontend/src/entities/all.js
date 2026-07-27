@@ -23,8 +23,16 @@ function makeEntity(basePath) {
 
 export const Account = makeEntity('/api/accounts')
 export const Trade = makeEntity('/api/trades')
-export const Strategy = makeEntity('/api/strategies')
+export const Strategy = {
+  ...makeEntity('/api/strategies'),
+  alertTemplates: (id) => api(`/api/strategies/${id}/alert-templates`),
+}
 export const Alert = makeEntity('/api/alerts')
+export const Goal = makeEntity('/api/goals')
+export const Vault = {
+  ...makeEntity('/api/vault'),
+  reveal: (id) => api(`/api/vault/${id}/reveal`),  // returns { ..., password: "..." }
+}
 
 // User is a singleton (current user) — different shape than the CRUD entities.
 export const User = {

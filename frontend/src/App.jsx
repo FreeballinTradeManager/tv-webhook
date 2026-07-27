@@ -12,6 +12,7 @@ import Strategies from './pages/Strategies'
 import Alerts from './pages/Alerts'
 import Settings from './pages/Settings'
 import Backtester from './pages/Backtester'
+import Vault from './pages/Vault'
 
 export default function App() {
   return (
@@ -30,6 +31,7 @@ export default function App() {
           <Route path="/Alerts" element={<Alerts />} />
           <Route path="/Settings" element={<Settings />} />
           <Route path="/Backtester" element={<Backtester />} />
+          <Route path="/Vault" element={<Vault />} />
           <Route path="*" element={<PageNotFound />} />
         </Routes>
       </Layout>
