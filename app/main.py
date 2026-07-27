@@ -1434,7 +1434,17 @@ def webhook(data: TradeEngineWebhook, db: Session = Depends(get_db)):
         group_obj = db.query(Group).filter(Group.name == data.group, Group.active.is_(True)).first()
         if not group_obj:
             raise HTTPException(status_code=404, detail=f"group '{data.group}' not found or inactive")
-        members = [m for m in group_obj.members if m.active and m.account and m.account.active]
+        # Only fan out to members whose account is in the "active" rotation
+        # state. benched/cooled/stopped accounts are skipped — they get
+        # promoted to active automatically when someone else rotates out.
+        members = [
+            m for m in group_obj.members
+            if m.active
+            and m.account
+            and m.account.active
+            and not m.account.paused
+            and (m.account.state or "active") == "active"
+        ]
         if not members:
             raise HTTPException(status_code=400, detail=f"group '{data.group}' has no active members")
 
