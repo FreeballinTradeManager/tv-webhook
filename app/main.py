@@ -539,6 +539,25 @@ def dashboard(db: Session = Depends(get_db)):
 
         active_badge = '<span class="badge status-open">ACTIVE</span>' if a.active else '<span class="badge status-closed">OFF</span>'
         paused_badge = ' <span class="badge status-stop">PAUSED</span>' if a.paused else ''
+
+        state = (a.state or "active")
+        state_map = {
+            "active":  '<span class="chip">ACTIVE</span>',
+            "benched": '<span class="chip chip-benched">BENCHED</span>',
+            "cooled":  '<span class="chip chip-cooled">COOLED</span>',
+            "stopped": '<span class="chip chip-stopped">STOPPED</span>',
+        }
+        state_html = state_map.get(state, f'<span class="chip">{state}</span>')
+
+        cycles_html = f'<span class="hint">W:{a.wins_cycle or 0}/L:{a.losses_cycle or 0}/${a.pnl_cycle or 0:,.0f}</span>'
+
+        # Quick-action buttons per row: activate, bench, reset cycle
+        btns = ' '.join([
+            f'<button type="button" class="btn-mini" onclick="setAccountState({a.id},\'active\')">Activate</button>',
+            f'<button type="button" class="btn-mini" onclick="setAccountState({a.id},\'benched\')">Bench</button>',
+            f'<button type="button" class="btn-mini" onclick="setAccountState({a.id},\'active\')">Reset</button>',
+        ])
+
         return f"""
         <tr>
             <td>{a.id}</td>
@@ -547,31 +566,97 @@ def dashboard(db: Session = Depends(get_db)):
             <td>{a.env}</td>
             <td>{a.account_id or "—"}</td>
             <td>{a.multiplier}×</td>
+            <td>{state_html}<br>{cycles_html}</td>
             <td>{today_html}</td>
             <td>{limit_html}</td>
             <td>{active_badge}{paused_badge}</td>
+            <td>{btns}</td>
         </tr>
         """
 
     accounts_html = "".join(_acct_row(a) for a in _all_accounts)
+
+    # Build id → name lookup for the "Next Group" cascade selector
+    _all_group_ids = [(g.id, g.name) for g in _all_groups]
 
     def _group_row(g: Group) -> str:
         members_html = "<span class='hint'>no members yet</span>"
         if g.members:
             active_members = [m for m in g.members if m.active]
             if active_members:
-                members_html = " ".join([
-                    f'<span class="chip">{m.account.name if m.account else "?"} <span class="hint">×{m.multiplier}</span></span>'
-                    for m in sorted(active_members, key=lambda x: x.priority)
-                ])
+                chips = []
+                for m in sorted(active_members, key=lambda x: x.priority):
+                    a = m.account
+                    if a is None:
+                        continue
+                    state = (a.state or "active")
+                    state_cls = {
+                        "active": "chip",
+                        "benched": "chip chip-benched",
+                        "cooled": "chip chip-cooled",
+                        "stopped": "chip chip-stopped",
+                    }.get(state, "chip")
+                    chips.append(
+                        f'<span class="{state_cls}">{a.name} <span class="hint">×{m.multiplier}</span> '
+                        f'<span class="hint">[{state[:3]}]</span></span>'
+                    )
+                members_html = " ".join(chips) if chips else members_html
         active_badge = '<span class="badge status-open">ACTIVE</span>' if g.active else '<span class="badge status-closed">OFF</span>'
+
+        # Next-group selector — <option> per known group + a None option
+        next_options = '<option value="">— none —</option>'
+        for gid, gname in _all_group_ids:
+            if gid == g.id:
+                continue
+            sel = " selected" if g.next_group_id == gid else ""
+            next_options += f'<option value="{gid}"{sel}>{gname}</option>'
+
+        # Compact view: shows rotation summary. Click "Edit" to expand form.
+        rot_summary = []
+        if g.rotate_after_wins:   rot_summary.append(f'{g.rotate_after_wins}W')
+        if g.rotate_after_losses: rot_summary.append(f'{g.rotate_after_losses}L')
+        if g.rotate_after_profit: rot_summary.append(f'+${g.rotate_after_profit:.0f}')
+        if g.rotate_after_loss_pnl: rot_summary.append(f'-${g.rotate_after_loss_pnl:.0f}')
+        rot_txt = " / ".join(rot_summary) if rot_summary else "—"
+        cascade_txt = ""
+        if g.next_group_id:
+            nx_name = next((n for i, n in _all_group_ids if i == g.next_group_id), None)
+            cascade_txt = f' → <span class="chip">{nx_name}</span>' if nx_name else ""
+
         return f"""
-        <tr>
+        <tr class="group-row" id="group-row-{g.id}">
             <td>{g.id}</td>
             <td><strong>{g.name}</strong></td>
             <td>{g.description or "—"}</td>
             <td>{members_html}</td>
+            <td>{rot_txt}{cascade_txt}</td>
             <td>{active_badge}</td>
+            <td>
+                <button type="button" class="btn-mini" onclick="toggleGroupEdit({g.id})">Edit</button>
+            </td>
+        </tr>
+        <tr class="group-edit-row" id="group-edit-{g.id}" style="display:none">
+            <td colspan="7">
+                <form onsubmit="return saveGroup(event, {g.id})">
+                    <div class="edit-grid">
+                        <label>Rotate after wins <input type="number" name="rotate_after_wins" value="{g.rotate_after_wins or ''}" min="1"></label>
+                        <label>Rotate after losses <input type="number" name="rotate_after_losses" value="{g.rotate_after_losses or ''}" min="1"></label>
+                        <label>Rotate after profit $ <input type="number" step="any" name="rotate_after_profit" value="{g.rotate_after_profit or ''}"></label>
+                        <label>Rotate after loss $ <input type="number" step="any" name="rotate_after_loss_pnl" value="{g.rotate_after_loss_pnl or ''}"></label>
+                        <label>Min active count <input type="number" name="min_active_count" value="{g.min_active_count or 1}" min="1"></label>
+                        <label>Next group (cascade)
+                            <select name="next_group_id">{next_options}</select>
+                        </label>
+                        <label>Description
+                            <input type="text" name="description" value="{(g.description or '').replace('"','&quot;')}">
+                        </label>
+                    </div>
+                    <div class="edit-actions">
+                        <button type="submit" class="btn-save">Save</button>
+                        <button type="button" class="btn-cancel" onclick="toggleGroupEdit({g.id})">Cancel</button>
+                    </div>
+                </form>
+            </td>
         </tr>
         """
 
@@ -844,6 +929,44 @@ def dashboard(db: Session = Depends(get_db)):
             .status-closed {{
                 background: rgba(148,163,184,0.18); color: #cbd5e1;
             }}
+            /* Phase 1.3: chip color per account state */
+            .chip-benched  {{ background: rgba(250,204,21,0.15); border-color: rgba(250,204,21,0.35); }}
+            .chip-cooled   {{ background: rgba(59,130,246,0.15); border-color: rgba(59,130,246,0.35); }}
+            .chip-stopped  {{ background: rgba(239,68,68,0.15); border-color: rgba(239,68,68,0.35); }}
+
+            /* Phase 1.3: inline edit forms */
+            .btn-mini {{
+                padding: 4px 10px; font-size: 12px;
+                background: rgba(59,130,246,0.20); border: 1px solid rgba(59,130,246,0.40);
+                border-radius: 6px; color: #dbeafe; cursor: pointer;
+            }}
+            .btn-mini:hover {{ background: rgba(59,130,246,0.35); }}
+            .btn-save {{
+                padding: 6px 14px; font-size: 13px; font-weight: 600;
+                background: rgba(34,197,94,0.30); border: 1px solid rgba(34,197,94,0.55);
+                border-radius: 6px; color: #ecfdf5; cursor: pointer;
+            }}
+            .btn-cancel {{
+                padding: 6px 14px; font-size: 13px;
+                background: rgba(148,163,184,0.15); border: 1px solid rgba(148,163,184,0.35);
+                border-radius: 6px; color: #cbd5e1; cursor: pointer;
+                margin-left: 8px;
+            }}
+            .edit-grid {{
+                display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+                gap: 10px 16px; padding: 12px;
+                background: rgba(255,255,255,0.03); border-radius: 12px;
+            }}
+            .edit-grid label {{
+                display: flex; flex-direction: column; gap: 4px;
+                font-size: 12px; color: #8ea0c9; text-transform: uppercase; letter-spacing: 0.08em;
+            }}
+            .edit-grid input, .edit-grid select {{
+                padding: 6px 10px; font-size: 14px;
+                background: rgba(0,0,0,0.30); color: #f5f7fb;
+                border: 1px solid rgba(255,255,255,0.15); border-radius: 6px;
+            }}
+            .edit-actions {{ padding: 10px 12px 4px 12px; }}
             .pnl-pos     {{ color: #86efac; font-weight: 700; }}
             .pnl-neg     {{ color: #fca5a5; font-weight: 700; }}
             .live-dot {{
@@ -925,9 +1048,11 @@ def dashboard(db: Session = Depends(get_db)):
                             <th>Env</th>
                             <th>Account ID</th>
                             <th>Mult</th>
+                            <th>State / Cycle</th>
                             <th>Today Realized</th>
                             <th>Daily Loss Used</th>
                             <th>Status</th>
+                            <th>Actions</th>
                         </tr>
                     </thead>
                     <tbody>{accounts_html}</tbody>
@@ -948,7 +1073,9 @@ def dashboard(db: Session = Depends(get_db)):
                             <th>Name</th>
                             <th>Description</th>
                             <th>Members</th>
+                            <th>Rotation → Cascade</th>
                             <th>Status</th>
+                            <th></th>
                         </tr>
                     </thead>
                     <tbody>{groups_html}</tbody>
@@ -1163,6 +1290,58 @@ def dashboard(db: Session = Depends(get_db)):
             }}
             connect();
         }})();
+
+        // Phase 1.3: Group edit forms + account state controls
+        function toggleGroupEdit(id) {{
+            const row = document.getElementById('group-edit-' + id);
+            if (!row) return;
+            row.style.display = (row.style.display === 'none' || !row.style.display) ? 'table-row' : 'none';
+        }}
+        async function saveGroup(ev, id) {{
+            ev.preventDefault();
+            const form = ev.target;
+            const fd = new FormData(form);
+            const body = {{}};
+            for (const [k, v] of fd.entries()) {{
+                if (v === '' || v === null) continue;
+                if (k === 'description') {{ body[k] = v; continue; }}
+                const num = Number(v);
+                body[k] = Number.isFinite(num) ? num : v;
+            }}
+            // 'next_group_id' + all rotate_* fields: allow explicit clear via a checkbox trick? For now empty=skip.
+            try {{
+                const resp = await fetch(`/api/groups/${{id}}?key=trading123`, {{
+                    method: 'PATCH',
+                    headers: {{'Content-Type': 'application/json'}},
+                    body: JSON.stringify(body),
+                }});
+                if (!resp.ok) {{
+                    const t = await resp.text();
+                    alert('Save failed: ' + resp.status + ' ' + t);
+                    return false;
+                }}
+                location.reload();
+            }} catch (e) {{
+                alert('Save error: ' + e);
+            }}
+            return false;
+        }}
+        async function patchAccount(id, body) {{
+            try {{
+                const resp = await fetch(`/api/accounts/${{id}}?key=trading123`, {{
+                    method: 'PATCH',
+                    headers: {{'Content-Type': 'application/json'}},
+                    body: JSON.stringify(body),
+                }});
+                if (!resp.ok) {{
+                    alert('Failed: ' + resp.status + ' ' + await resp.text());
+                    return;
+                }}
+                location.reload();
+            }} catch (e) {{ alert('Error: ' + e); }}
+        }}
+        function setAccountState(id, state) {{ patchAccount(id, {{state, wins_cycle: 0, losses_cycle: 0, pnl_cycle: 0}}); }}
+        function pauseAccount(id, val)    {{ patchAccount(id, {{paused: !!val}}); }}
         </script>
     </body>
     </html>
@@ -1434,6 +1613,48 @@ def webhook(data: TradeEngineWebhook, db: Session = Depends(get_db)):
         group_obj = db.query(Group).filter(Group.name == data.group, Group.active.is_(True)).first()
         if not group_obj:
             raise HTTPException(status_code=404, detail=f"group '{data.group}' not found or inactive")
+
+        # Phase 1.3: cascade. If the requested group is exhausted (no
+        # active AND no benched to promote), follow next_group_id
+        # recursively. When we cascade to a new group, auto-promote its
+        # highest-priority benched members up to min_active_count so
+        # the new group has someone to fire on. Cycle-guarded.
+        def _active_count(g):
+            return sum(
+                1 for m in g.members
+                if m.active and m.account and m.account.active
+                and not m.account.paused
+                and (m.account.state or "active") == "active"
+            )
+        def _benched_count(g):
+            return sum(
+                1 for m in g.members
+                if m.active and m.account and m.account.active
+                and (m.account.state or "active") == "benched"
+            )
+        cascade_chain = [group_obj.name]
+        seen_ids = {group_obj.id}
+        while _active_count(group_obj) == 0 and _benched_count(group_obj) == 0 and group_obj.next_group_id:
+            nxt = db.query(Group).filter(Group.id == group_obj.next_group_id).first()
+            if not nxt or nxt.id in seen_ids:
+                break
+            seen_ids.add(nxt.id)
+            cascade_chain.append(nxt.name)
+            nxt.active = True
+            benched = sorted(
+                [m for m in nxt.members
+                 if m.active and m.account and m.account.active
+                 and (m.account.state or "active") == "benched"],
+                key=lambda x: (x.priority, x.id),
+            )
+            for m in benched[: (nxt.min_active_count or 1)]:
+                m.account.state = "active"
+                m.account.wins_cycle = 0
+                m.account.losses_cycle = 0
+                m.account.pnl_cycle = 0.0
+            db.flush()
+            group_obj = nxt
+
         # Only fan out to members whose account is in the "active" rotation
         # state. benched/cooled/stopped accounts are skipped — they get
         # promoted to active automatically when someone else rotates out.
@@ -1446,7 +1667,10 @@ def webhook(data: TradeEngineWebhook, db: Session = Depends(get_db)):
             and (m.account.state or "active") == "active"
         ]
         if not members:
-            raise HTTPException(status_code=400, detail=f"group '{data.group}' has no active members")
+            raise HTTPException(
+                status_code=400,
+                detail=f"group '{data.group}' has no active members (cascade tried: {' → '.join(cascade_chain)})",
+            )
 
         leg_results: list[dict] = []
         base_trade_id = data.trade_id
@@ -1736,6 +1960,8 @@ class GroupCreate(BaseModel):
     rotate_after_profit: Optional[float] = None
     rotate_after_loss_pnl: Optional[float] = None
     min_active_count: int = 1
+    # Phase 1.3: cascade — chain to another group when exhausted
+    next_group_id: Optional[int] = None
 
 
 class GroupUpdate(BaseModel):
@@ -1748,6 +1974,11 @@ class GroupUpdate(BaseModel):
     rotate_after_profit: Optional[float] = None
     rotate_after_loss_pnl: Optional[float] = None
     min_active_count: Optional[int] = None
+    # Phase 1.3: cascade
+    next_group_id: Optional[int] = None
+    # Allow clearing next_group_id via explicit null. Pydantic v2:
+    # any None in the payload triggers the None default — so we treat
+    # setting = null as "clear the FK" by checking the raw dict at PATCH time.
 
 
 class GroupMemberCreate(BaseModel):
@@ -1800,6 +2031,8 @@ def _group_to_dict(g: Group, include_members: bool = True) -> dict:
         "rotate_after_profit": getattr(g, "rotate_after_profit", None),
         "rotate_after_loss_pnl": getattr(g, "rotate_after_loss_pnl", None),
         "min_active_count": getattr(g, "min_active_count", 1),
+        # Phase 1.3 cascade
+        "next_group_id": getattr(g, "next_group_id", None),
         "created_at": g.created_at,
         "updated_at": g.updated_at,
     }
@@ -1898,6 +2131,7 @@ def create_group(data: GroupCreate, key: str = "", db: Session = Depends(get_db)
         rotate_after_profit=data.rotate_after_profit,
         rotate_after_loss_pnl=data.rotate_after_loss_pnl,
         min_active_count=data.min_active_count,
+        next_group_id=data.next_group_id,
     )
     db.add(g)
     db.commit()
@@ -1917,6 +2151,8 @@ def update_group(group_id: int, data: GroupUpdate, key: str = "", db: Session = 
         "rotate_after_wins", "rotate_after_losses",
         "rotate_after_profit", "rotate_after_loss_pnl",
         "min_active_count",
+        # Phase 1.3 cascade
+        "next_group_id",
     ):
         v = getattr(data, field, None)
         if v is not None:

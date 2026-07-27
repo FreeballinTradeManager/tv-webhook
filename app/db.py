@@ -86,6 +86,22 @@ MIGRATIONS = [
     "ALTER TABLE groups ADD COLUMN IF NOT EXISTS rotate_after_profit DOUBLE PRECISION",
     "ALTER TABLE groups ADD COLUMN IF NOT EXISTS rotate_after_loss_pnl DOUBLE PRECISION",
     "ALTER TABLE groups ADD COLUMN IF NOT EXISTS min_active_count INTEGER NOT NULL DEFAULT 1",
+
+    # Phase 1.3: group cascade — when group is exhausted, fall through to next.
+    "ALTER TABLE groups ADD COLUMN IF NOT EXISTS next_group_id INTEGER",
+    """
+    DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint WHERE conname = 'groups_next_group_id_fkey'
+        ) THEN
+            ALTER TABLE groups
+                ADD CONSTRAINT groups_next_group_id_fkey
+                FOREIGN KEY (next_group_id) REFERENCES groups(id) ON DELETE SET NULL
+                NOT VALID;
+        END IF;
+    END $$;
+    """,
     # Foreign key added separately with NOT VALID so it never blocks
     # startup even if there are orphaned rows. Postgres validates lazily.
     # Wrapped in DO block for idempotency (Postgres doesn't have

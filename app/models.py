@@ -223,6 +223,12 @@ class Group(Base):
     rotate_after_loss_pnl = Column(Float, nullable=True)   # rotate when Account.pnl_cycle <= -this $ amount
     min_active_count = Column(Integer, nullable=False, default=1)
 
+    # Phase 1.3: cascade to another group when this one is exhausted
+    # (no more active members and no benched left to promote).
+    # When set, the fan-out webhook will fall through to next_group_id
+    # and auto-promote its benched members. Chains recursively.
+    next_group_id = Column(Integer, ForeignKey("groups.id", ondelete="SET NULL"), nullable=True)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(
         DateTime(timezone=True),
