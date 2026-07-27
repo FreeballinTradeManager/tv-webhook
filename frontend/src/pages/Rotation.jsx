@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from "react";
-import { Group, Account } from "@/entities/all";
+import { Group, Account, Strategy } from "@/entities/all";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -10,12 +10,95 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter, DialogClose
 } from "@/components/ui/dialog";
 import {
-  Users, ArrowRight, Plus, Trash2, Zap, Repeat, ChevronRight, Trophy,
-  ShieldAlert, Clock, Link2, UserPlus, Save
+  Users, ArrowRight, Plus, Trash2, Zap, Repeat, Trophy,
+  Clock, Link2, UserPlus, Save, X, BookOpen, ShieldAlert
 } from "lucide-react";
 
-// Config panel for one group — inline edit of all rotation fields
-function GroupCard({ group, allGroups, allAccounts, onUpdate, onDelete, onAddMember, onDeleteMember }) {
+// Preset time windows for common sessions
+const SESSION_PRESETS = [
+  { label: "London", windows: [{start:"03:00",end:"12:00",tz:"America/New_York"}] },
+  { label: "New York", windows: [{start:"08:00",end:"17:00",tz:"America/New_York"}] },
+  { label: "Asian", windows: [{start:"20:00",end:"02:00",tz:"America/New_York"}] },
+  { label: "Big Risk", windows: [
+      {start:"18:00",end:"01:00",tz:"America/New_York"},
+      {start:"11:45",end:"15:00",tz:"America/New_York"},
+    ]},
+  { label: "24/7", windows: [] },  // empty = always tradeable
+];
+
+/** Cascade chain visualization for a group — walks next_group_id links */
+function CascadeChain({ startGroupId, allGroups }) {
+  const chain = [];
+  const seen = new Set();
+  let cur = startGroupId;
+  while (cur && !seen.has(cur) && chain.length < 6) {  // guard against loops
+    const g = allGroups.find(x => x.id === cur);
+    if (!g) break;
+    chain.push(g);
+    seen.add(cur);
+    cur = g.next_group_id;
+  }
+  if (chain.length <= 1) return null;
+  return (
+    <div className="flex items-center gap-1.5 flex-wrap text-xs">
+      {chain.map((g, i) => (
+        <React.Fragment key={g.id}>
+          <Badge variant="outline" className={i === 0
+            ? "bg-blue-500/20 text-blue-300 border-blue-500/50 font-semibold"
+            : "bg-slate-800 text-slate-400 border-slate-700"}>
+            {String.fromCharCode(65 + i)} · {g.name}
+          </Badge>
+          {i < chain.length - 1 && <ArrowRight className="w-3 h-3 text-slate-600"/>}
+        </React.Fragment>
+      ))}
+    </div>
+  );
+}
+
+function TimeWindowsEditor({ windows, onChange }) {
+  const add = () => onChange([...(windows || []), { start: "09:30", end: "16:00", tz: "America/New_York" }]);
+  const remove = (i) => onChange(windows.filter((_, idx) => idx !== i));
+  const patch = (i, k, v) => onChange(windows.map((w, idx) => idx === i ? {...w, [k]: v} : w));
+  const applyPreset = (preset) => onChange([...preset.windows]);
+
+  return (
+    <div className="space-y-2">
+      {(!windows || windows.length === 0) && (
+        <div className="text-xs text-green-400 bg-green-500/10 border border-green-500/30 rounded px-2 py-1.5">
+          🟢 Always tradeable (no time restrictions)
+        </div>
+      )}
+      {(windows || []).map((w, i) => (
+        <div key={i} className="flex items-center gap-1.5 text-xs">
+          <Clock className="w-3 h-3 text-slate-500 shrink-0"/>
+          <Input type="time" value={w.start || "09:30"} onChange={e => patch(i, "start", e.target.value)}
+                 className="bg-slate-800 border-slate-700 text-white h-7 w-24"/>
+          <span className="text-slate-500">→</span>
+          <Input type="time" value={w.end || "16:00"} onChange={e => patch(i, "end", e.target.value)}
+                 className="bg-slate-800 border-slate-700 text-white h-7 w-24"/>
+          <span className="text-slate-500 text-[10px]">ET</span>
+          <Button size="icon" variant="ghost" className="h-6 w-6 ml-auto" onClick={() => remove(i)}>
+            <X className="w-3 h-3 text-red-500"/>
+          </Button>
+        </div>
+      ))}
+      <div className="flex flex-wrap gap-1 pt-1">
+        <Button size="sm" variant="outline" className="h-6 text-xs" onClick={add}>
+          <Plus className="w-3 h-3 mr-1"/>Custom
+        </Button>
+        {SESSION_PRESETS.map(p => (
+          <Button key={p.label} size="sm" variant="outline" className="h-6 text-xs text-slate-400"
+                  onClick={() => applyPreset(p)}>
+            {p.label}
+          </Button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function GroupCard({ group, allGroups, allAccounts, allStrategies, onUpdate, onDelete,
+                    onAddMember, onDeleteMember, groupIndex }) {
   const [edit, setEdit] = useState({
     name: group.name || "",
     rotate_after_wins: group.rotate_after_wins || "",
@@ -25,20 +108,18 @@ function GroupCard({ group, allGroups, allAccounts, onUpdate, onDelete, onAddMem
     min_active_count: group.min_active_count || 1,
     next_group_id: group.next_group_id || "",
     active: group.active !== false,
+    time_windows: group.time_windows || [],
+    schedule_label: group.schedule_label || "",
   });
   const [dirty, setDirty] = useState(false);
   const [addingMember, setAddingMember] = useState(false);
   const [newAcctId, setNewAcctId] = useState("");
   const [newMult, setNewMult] = useState(1.0);
 
-  const nextGroup = group.next_group_id
-    ? allGroups.find(g => g.id === group.next_group_id)
-    : null;
-
   const set = (k, v) => { setEdit(prev => ({...prev, [k]: v})); setDirty(true); };
+  const setWindows = (w) => set("time_windows", w);
 
   const save = async () => {
-    // Normalize empty strings to null so the backend doesn't get "" for numeric fields
     const payload = {};
     for (const [k, v] of Object.entries(edit)) {
       if (v === "" && ["rotate_after_wins","rotate_after_losses","rotate_after_profit","rotate_after_loss_pnl","next_group_id"].includes(k)) {
@@ -52,110 +133,81 @@ function GroupCard({ group, allGroups, allAccounts, onUpdate, onDelete, onAddMem
   };
 
   const memberAccounts = (group.members || []).map(m => ({
-    ...m,
-    account: allAccounts.find(a => a.id === m.account_id),
+    ...m, account: allAccounts.find(a => a.id === m.account_id),
   }));
+  const boundStrategies = allStrategies.filter(s => s.default_group_id === group.id);
+  const nextGroup = group.next_group_id ? allGroups.find(g => g.id === group.next_group_id) : null;
+
+  // Format rotation rules as readable summary
+  const rules = [];
+  if (edit.rotate_after_wins) rules.push(`${edit.rotate_after_wins} wins`);
+  if (edit.rotate_after_losses) rules.push(`${edit.rotate_after_losses} losses`);
+  if (edit.rotate_after_profit) rules.push(`+$${edit.rotate_after_profit}`);
+  if (edit.rotate_after_loss_pnl) rules.push(`−$${edit.rotate_after_loss_pnl}`);
+  const rulesSummary = rules.length ? rules.join(" · ") : "no triggers";
 
   return (
     <Card className={`bg-slate-900 border-slate-800 ${!edit.active ? "opacity-60" : ""}`}>
-      <CardHeader className="pb-3">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Users className="w-5 h-5 text-blue-500"/>
-            <Input
-              value={edit.name}
-              onChange={e => set("name", e.target.value)}
-              className="bg-transparent border-0 text-white text-xl font-bold p-0 h-auto focus-visible:ring-0"
-            />
+      <CardHeader className="pb-2">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0 flex-1">
+            <Badge variant="outline" className="bg-blue-500/20 text-blue-300 border-blue-500/50 font-bold shrink-0">
+              {String.fromCharCode(65 + groupIndex)}
+            </Badge>
+            <Users className="w-5 h-5 text-blue-500 shrink-0"/>
+            <Input value={edit.name} onChange={e => set("name", e.target.value)}
+                   className="bg-transparent border-0 text-white text-xl font-bold p-0 h-auto focus-visible:ring-0 min-w-0"/>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1 shrink-0">
             <Button size="sm" variant={edit.active ? "outline" : "ghost"}
                     onClick={() => set("active", !edit.active)}
-                    className={edit.active
-                      ? "text-green-400 border-green-500/30"
-                      : "text-slate-500"}>
+                    className={edit.active ? "text-green-400 border-green-500/30 h-7"
+                                           : "text-slate-500 h-7"}>
               {edit.active ? "🟢 Active" : "⚪ Paused"}
             </Button>
-            <Button size="icon" variant="ghost" onClick={() => onDelete(group.id)}>
+            <Button size="icon" variant="ghost" onClick={() => onDelete(group.id)} className="h-7 w-7">
               <Trash2 className="w-4 h-4 text-red-500"/>
             </Button>
           </div>
         </div>
       </CardHeader>
-      <CardContent className="space-y-4">
-        {/* Rotation triggers */}
-        <div>
-          <div className="text-xs uppercase text-slate-500 font-semibold mb-2 flex items-center gap-1">
-            <Repeat className="w-3 h-3"/> Rotation Triggers (any one fires cascade)
+
+      <CardContent className="space-y-4 pt-2">
+        {/* Section 1: TIME */}
+        <div className="border-l-2 border-blue-500/40 pl-3">
+          <div className="text-xs uppercase text-blue-400 font-semibold mb-2 flex items-center gap-1">
+            <Clock className="w-3 h-3"/> Time — when this group is allowed to trade
           </div>
-          <div className="grid grid-cols-2 gap-2 text-sm">
-            <div>
-              <Label className="text-slate-400 text-xs">After N wins</Label>
-              <Input type="number" min="0" value={edit.rotate_after_wins}
-                     onChange={e => set("rotate_after_wins", e.target.value ? +e.target.value : "")}
-                     placeholder="—"
-                     className="bg-slate-800 border-slate-700 text-white h-8"/>
-            </div>
-            <div>
-              <Label className="text-slate-400 text-xs">After N losses</Label>
-              <Input type="number" min="0" value={edit.rotate_after_losses}
-                     onChange={e => set("rotate_after_losses", e.target.value ? +e.target.value : "")}
-                     placeholder="—"
-                     className="bg-slate-800 border-slate-700 text-white h-8"/>
-            </div>
-            <div>
-              <Label className="text-slate-400 text-xs">$ profit cap</Label>
-              <Input type="number" min="0" value={edit.rotate_after_profit}
-                     onChange={e => set("rotate_after_profit", e.target.value ? +e.target.value : "")}
-                     placeholder="e.g. 500"
-                     className="bg-slate-800 border-slate-700 text-white h-8"/>
-            </div>
-            <div>
-              <Label className="text-slate-400 text-xs">$ loss cap</Label>
-              <Input type="number" min="0" value={edit.rotate_after_loss_pnl}
-                     onChange={e => set("rotate_after_loss_pnl", e.target.value ? +e.target.value : "")}
-                     placeholder="e.g. 500"
-                     className="bg-slate-800 border-slate-700 text-white h-8"/>
-            </div>
-          </div>
-          <div className="mt-2">
-            <Label className="text-slate-400 text-xs">Min active accounts</Label>
-            <Input type="number" min="1" value={edit.min_active_count}
-                   onChange={e => set("min_active_count", +e.target.value)}
-                   className="bg-slate-800 border-slate-700 text-white h-8 w-24"/>
-          </div>
+          <TimeWindowsEditor windows={edit.time_windows} onChange={setWindows}/>
         </div>
 
-        {/* Cascade target */}
-        <div>
-          <div className="text-xs uppercase text-slate-500 font-semibold mb-1 flex items-center gap-1">
-            <ArrowRight className="w-3 h-3"/> When exhausted → cascade to
+        {/* Section 2: STRATEGY */}
+        <div className="border-l-2 border-purple-500/40 pl-3">
+          <div className="text-xs uppercase text-purple-400 font-semibold mb-2 flex items-center gap-1">
+            <BookOpen className="w-3 h-3"/> Strategy — Pine indicators firing into this group
           </div>
-          <Select value={String(edit.next_group_id || "")}
-                  onValueChange={v => set("next_group_id", v ? +v : "")}>
-            <SelectTrigger className="bg-slate-800 border-slate-700 text-white h-9">
-              <SelectValue placeholder="(none — stop here)"/>
-            </SelectTrigger>
-            <SelectContent className="bg-slate-800 border-slate-700 text-white">
-              <SelectItem value="">(none — stop here)</SelectItem>
-              {allGroups.filter(g => g.id !== group.id).map(g => (
-                <SelectItem key={g.id} value={String(g.id)}>{g.name}</SelectItem>
+          {boundStrategies.length === 0 ? (
+            <div className="text-xs text-slate-500">
+              No strategies bound. Go to Strategies page → edit a strategy → set default_group_id to bind.
+            </div>
+          ) : (
+            <div className="flex flex-wrap gap-1.5">
+              {boundStrategies.map(s => (
+                <Badge key={s.id} variant="outline"
+                       className="bg-purple-500/10 text-purple-300 border-purple-500/30 text-xs">
+                  <Zap className="w-2.5 h-2.5 mr-1"/>{s.name}
+                  {s.broker_format && <span className="ml-1 text-slate-500">({s.broker_format})</span>}
+                </Badge>
               ))}
-            </SelectContent>
-          </Select>
-          {nextGroup && (
-            <div className="mt-2 flex items-center gap-2 text-sm text-blue-400 bg-blue-500/10 border border-blue-500/30 rounded-md px-3 py-2">
-              <Link2 className="w-3 h-3"/>
-              Next up: <span className="font-semibold">{nextGroup.name}</span>
             </div>
           )}
         </div>
 
-        {/* Members */}
-        <div>
-          <div className="text-xs uppercase text-slate-500 font-semibold mb-2 flex items-center justify-between">
-            <span className="flex items-center gap-1"><UserPlus className="w-3 h-3"/> Accounts in this group ({memberAccounts.length})</span>
-            <Button size="sm" variant="outline" onClick={() => setAddingMember(!addingMember)} className="h-7 text-xs">
+        {/* Section 3: PROP FIRMS / ACCOUNTS */}
+        <div className="border-l-2 border-green-500/40 pl-3">
+          <div className="text-xs uppercase text-green-400 font-semibold mb-2 flex items-center justify-between">
+            <span className="flex items-center gap-1"><UserPlus className="w-3 h-3"/> Prop Firms — accounts in this group ({memberAccounts.length})</span>
+            <Button size="sm" variant="outline" onClick={() => setAddingMember(!addingMember)} className="h-6 text-xs">
               {addingMember ? "Cancel" : "+ Add"}
             </Button>
           </div>
@@ -188,7 +240,7 @@ function GroupCard({ group, allGroups, allAccounts, onUpdate, onDelete, onAddMem
           )}
           <div className="space-y-1">
             {memberAccounts.length === 0 && (
-              <div className="text-xs text-slate-500 text-center py-3">No accounts in this group yet.</div>
+              <div className="text-xs text-slate-500">No accounts yet.</div>
             )}
             {memberAccounts.map(m => {
               const acc = m.account;
@@ -197,19 +249,82 @@ function GroupCard({ group, allGroups, allAccounts, onUpdate, onDelete, onAddMem
                                  acc?.state === "stopped" ? "text-red-400" :
                                  acc?.state === "benched" ? "text-yellow-400" : "text-slate-400";
               return (
-                <div key={m.id} className="flex items-center justify-between text-sm bg-slate-800/50 rounded px-2 py-1.5">
+                <div key={m.id} className="flex items-center justify-between text-sm bg-slate-800/50 rounded px-2 py-1">
                   <div className="flex items-center gap-2 flex-1 min-w-0">
                     <span className={`text-xs ${stateColor}`}>●</span>
                     <span className="text-slate-200 truncate">{acc?.name || `#${m.account_id}`}</span>
-                    <span className="text-xs text-slate-500">×{m.multiplier}</span>
+                    {acc?.broker && <span className="text-[10px] text-slate-500">{acc.broker}</span>}
+                    <span className="text-xs text-slate-500 ml-auto">×{m.multiplier}</span>
                   </div>
-                  <Button size="icon" variant="ghost" className="h-6 w-6"
+                  <Button size="icon" variant="ghost" className="h-5 w-5 ml-1"
                           onClick={() => onDeleteMember(group.id, m.id)}>
                     <Trash2 className="w-3 h-3 text-red-500"/>
                   </Button>
                 </div>
               );
             })}
+          </div>
+        </div>
+
+        {/* Section 4: RULES */}
+        <div className="border-l-2 border-yellow-500/40 pl-3">
+          <div className="text-xs uppercase text-yellow-400 font-semibold mb-2 flex items-center gap-1">
+            <ShieldAlert className="w-3 h-3"/> Rules — rotate when any trigger hits
+            <span className="ml-auto text-slate-500 normal-case font-normal">Currently: {rulesSummary}</span>
+          </div>
+          <div className="grid grid-cols-4 gap-1.5 text-xs">
+            <div>
+              <Label className="text-slate-500 text-[10px]">Wins</Label>
+              <Input type="number" min="0" value={edit.rotate_after_wins}
+                     onChange={e => set("rotate_after_wins", e.target.value ? +e.target.value : "")}
+                     placeholder="—" className="bg-slate-800 border-slate-700 text-white h-7"/>
+            </div>
+            <div>
+              <Label className="text-slate-500 text-[10px]">Losses</Label>
+              <Input type="number" min="0" value={edit.rotate_after_losses}
+                     onChange={e => set("rotate_after_losses", e.target.value ? +e.target.value : "")}
+                     placeholder="—" className="bg-slate-800 border-slate-700 text-white h-7"/>
+            </div>
+            <div>
+              <Label className="text-slate-500 text-[10px]">Win $</Label>
+              <Input type="number" min="0" value={edit.rotate_after_profit}
+                     onChange={e => set("rotate_after_profit", e.target.value ? +e.target.value : "")}
+                     placeholder="500" className="bg-slate-800 border-slate-700 text-white h-7"/>
+            </div>
+            <div>
+              <Label className="text-slate-500 text-[10px]">Loss $</Label>
+              <Input type="number" min="0" value={edit.rotate_after_loss_pnl}
+                     onChange={e => set("rotate_after_loss_pnl", e.target.value ? +e.target.value : "")}
+                     placeholder="500" className="bg-slate-800 border-slate-700 text-white h-7"/>
+            </div>
+          </div>
+          <div className="mt-1.5 flex items-center gap-2">
+            <Label className="text-slate-500 text-[10px]">Min active accounts</Label>
+            <Input type="number" min="1" value={edit.min_active_count}
+                   onChange={e => set("min_active_count", +e.target.value)}
+                   className="bg-slate-800 border-slate-700 text-white h-7 w-16"/>
+          </div>
+        </div>
+
+        {/* Section 5: CASCADE CHAIN */}
+        <div className="border-l-2 border-orange-500/40 pl-3">
+          <div className="text-xs uppercase text-orange-400 font-semibold mb-2 flex items-center gap-1">
+            <Link2 className="w-3 h-3"/> Rotate Groups — chain to next when exhausted
+          </div>
+          <Select value={String(edit.next_group_id || "")}
+                  onValueChange={v => set("next_group_id", v ? +v : "")}>
+            <SelectTrigger className="bg-slate-800 border-slate-700 text-white h-8">
+              <SelectValue placeholder="(stop here — no cascade)"/>
+            </SelectTrigger>
+            <SelectContent className="bg-slate-800 border-slate-700 text-white">
+              <SelectItem value="">(stop here — no cascade)</SelectItem>
+              {allGroups.filter(g => g.id !== group.id).map(g => (
+                <SelectItem key={g.id} value={String(g.id)}>{g.name}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <div className="mt-2">
+            <CascadeChain startGroupId={group.id} allGroups={allGroups}/>
           </div>
         </div>
 
@@ -223,7 +338,6 @@ function GroupCard({ group, allGroups, allAccounts, onUpdate, onDelete, onAddMem
   );
 }
 
-// New Group creation form
 function NewGroupDialog({ open, onOpenChange, onCreate }) {
   const [name, setName] = useState("");
   return (
@@ -233,10 +347,10 @@ function NewGroupDialog({ open, onOpenChange, onCreate }) {
         <div className="space-y-2">
           <Label className="text-slate-300">Group Name</Label>
           <Input value={name} onChange={e => setName(e.target.value)}
-                 placeholder="e.g. group1_auto, group2_manual, big_risk"
+                 placeholder="e.g. Auto Rotation, Big Risk, London Session"
                  className="bg-slate-700 border-slate-600 text-white"/>
           <p className="text-xs text-slate-500">
-            Groups fan-out signals to their active accounts. Configure rotation triggers + cascade after creation.
+            After creating, add rotation rules + time windows + prop firm accounts + chain to next group.
           </p>
         </div>
         <DialogFooter>
@@ -244,8 +358,7 @@ function NewGroupDialog({ open, onOpenChange, onCreate }) {
           <Button className="bg-blue-600 hover:bg-blue-700" onClick={async () => {
             if (!name.trim()) return;
             await onCreate({ name: name.trim(), active: true });
-            setName("");
-            onOpenChange(false);
+            setName(""); onOpenChange(false);
           }}>Create</Button>
         </DialogFooter>
       </DialogContent>
@@ -256,44 +369,33 @@ function NewGroupDialog({ open, onOpenChange, onCreate }) {
 export default function RotationPage() {
   const [groups, setGroups] = useState([]);
   const [accounts, setAccounts] = useState([]);
+  const [strategies, setStrategies] = useState([]);
   const [loading, setLoading] = useState(true);
   const [newGroupOpen, setNewGroupOpen] = useState(false);
 
   const load = async () => {
     setLoading(true);
-    const [gs, as] = await Promise.all([Group.list(), Account.list()]);
-    setGroups(gs); setAccounts(as); setLoading(false);
+    const [gs, as, ss] = await Promise.all([Group.list(), Account.list(), Strategy.list().catch(() => [])]);
+    setGroups(gs); setAccounts(as); setStrategies(ss); setLoading(false);
   };
   useEffect(() => { load(); }, []);
 
-  const handleUpdate = async (id, payload) => {
-    await Group.update(id, payload);
-    load();
-  };
+  const handleUpdate = async (id, payload) => { await Group.update(id, payload); load(); };
   const handleDelete = async (id) => {
-    if (window.confirm("Delete this group? Members' accounts stay, they just won't belong to any group.")) {
-      await Group.delete(id);
-      load();
+    if (window.confirm("Delete this group? Its accounts stay but are un-grouped.")) {
+      await Group.delete(id); load();
     }
   };
-  const handleAddMember = async (groupId, payload) => {
-    await Group.addMember(groupId, payload);
-    load();
-  };
-  const handleDeleteMember = async (groupId, memberId) => {
-    await Group.deleteMember(groupId, memberId);
-    load();
-  };
-  const handleCreate = async (payload) => {
-    await Group.create(payload);
-    load();
-  };
+  const handleAddMember = async (groupId, payload) => { await Group.addMember(groupId, payload); load(); };
+  const handleDeleteMember = async (groupId, memberId) => { await Group.deleteMember(groupId, memberId); load(); };
+  const handleCreate = async (payload) => { await Group.create(payload); load(); };
 
-  // Accounts not in any group — standalone accounts (each gets its own routing)
-  const groupedAcctIds = new Set(
-    groups.flatMap(g => (g.members || []).map(m => m.account_id))
-  );
+  const groupedAcctIds = new Set(groups.flatMap(g => (g.members || []).map(m => m.account_id)));
   const standalone = accounts.filter(a => !groupedAcctIds.has(a.id));
+
+  // Find any groups that are "roots" of a cascade chain (nothing else cascades INTO them)
+  const cascadedInto = new Set(groups.map(g => g.next_group_id).filter(Boolean));
+  const rootGroups = groups.filter(g => !cascadedInto.has(g.id));
 
   return (
     <div className="p-4 md:p-8 bg-slate-950 min-h-screen">
@@ -304,10 +406,7 @@ export default function RotationPage() {
               <Repeat className="w-8 h-8 text-blue-500"/> Group Your Trades
             </h1>
             <p className="text-slate-400 mt-1">
-              Rotate accounts within a group, chain groups together, or keep accounts standalone.
-              <span className="text-slate-500 block text-sm mt-1">
-                Same webhook can fan out to a group — OR each account can have its own webhook via the Strategies page.
-              </span>
+              Each group = <span className="text-blue-400">Time</span> · <span className="text-purple-400">Strategy</span> · <span className="text-green-400">Prop Firms</span> · <span className="text-yellow-400">Rules</span> · <span className="text-orange-400">Rotate Groups A→B→C</span>
             </p>
           </div>
           <Button onClick={() => setNewGroupOpen(true)} className="bg-blue-600 hover:bg-blue-700">
@@ -315,29 +414,24 @@ export default function RotationPage() {
           </Button>
         </div>
 
-        {/* Legend explaining the concept */}
-        <Card className="bg-slate-900 border-slate-800 border-l-4 border-l-blue-500">
-          <CardContent className="p-4 text-sm text-slate-300 grid md:grid-cols-3 gap-3">
-            <div className="flex items-start gap-2">
-              <Zap className="w-4 h-4 text-blue-400 mt-0.5 shrink-0"/>
-              <div><strong className="text-white">Group with rotation</strong> — one webhook fans out to N accounts, rotates when triggers fire</div>
-            </div>
-            <div className="flex items-start gap-2">
-              <ChevronRight className="w-4 h-4 text-purple-400 mt-0.5 shrink-0"/>
-              <div><strong className="text-white">Chain groups</strong> — Group1 exhausts → cascades to Group2 → Group3</div>
-            </div>
-            <div className="flex items-start gap-2">
-              <Users className="w-4 h-4 text-slate-400 mt-0.5 shrink-0"/>
-              <div><strong className="text-white">Standalone</strong> — accounts not in any group get their own webhook via Strategies page</div>
-            </div>
-          </CardContent>
-        </Card>
+        {/* Cascade chains overview */}
+        {rootGroups.length > 0 && groups.length > 1 && (
+          <Card className="bg-slate-900 border-slate-800">
+            <CardContent className="p-4">
+              <div className="text-xs uppercase text-slate-500 font-semibold mb-2">Your Rotation Chains</div>
+              <div className="space-y-2">
+                {rootGroups.map(root => (
+                  <div key={root.id} className="flex items-center gap-2">
+                    <CascadeChain startGroupId={root.id} allGroups={groups}/>
+                  </div>
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+        )}
 
         {/* Groups */}
         <div className="space-y-4">
-          <h2 className="text-lg font-semibold text-slate-300 flex items-center gap-2">
-            <Users className="w-5 h-5"/>Groups ({groups.length})
-          </h2>
           {loading ? (
             <div className="text-slate-500 text-center py-8">Loading…</div>
           ) : groups.length === 0 ? (
@@ -348,15 +442,12 @@ export default function RotationPage() {
             </Card>
           ) : (
             <div className="grid md:grid-cols-2 gap-4">
-              {groups.map(g => (
+              {groups.map((g, i) => (
                 <GroupCard key={g.id}
-                           group={g}
-                           allGroups={groups}
-                           allAccounts={accounts}
-                           onUpdate={handleUpdate}
-                           onDelete={handleDelete}
-                           onAddMember={handleAddMember}
-                           onDeleteMember={handleDeleteMember}/>
+                           group={g} groupIndex={i}
+                           allGroups={groups} allAccounts={accounts} allStrategies={strategies}
+                           onUpdate={handleUpdate} onDelete={handleDelete}
+                           onAddMember={handleAddMember} onDeleteMember={handleDeleteMember}/>
               ))}
             </div>
           )}
@@ -367,7 +458,7 @@ export default function RotationPage() {
           <div className="space-y-3">
             <h2 className="text-lg font-semibold text-slate-300 flex items-center gap-2">
               <Users className="w-5 h-5"/>Standalone Accounts ({standalone.length})
-              <span className="text-sm font-normal text-slate-500">— not in any group, each uses its own webhook</span>
+              <span className="text-sm font-normal text-slate-500">— not in any group, each uses its own webhook via Strategies page</span>
             </h2>
             <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-3">
               {standalone.map(a => (

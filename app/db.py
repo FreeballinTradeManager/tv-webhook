@@ -151,6 +151,10 @@ MIGRATIONS = [
     # Task #148: password vault table auto-created by Base.metadata.create_all.
     # Nothing to seed.
 
+    # Tasks #69 + #151 + #152: group time windows for session scheduling
+    "ALTER TABLE groups ADD COLUMN IF NOT EXISTS time_windows JSON",
+    "ALTER TABLE groups ADD COLUMN IF NOT EXISTS schedule_label TEXT",
+
     # Phase 2.1b: extend positions with Base44 Trade shape fields so we can
     # serve /api/trades from the same table. Nullable — legacy positions
     # keep working.

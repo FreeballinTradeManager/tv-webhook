@@ -247,6 +247,17 @@ class Group(Base):
     # and auto-promote its benched members. Chains recursively.
     next_group_id = Column(Integer, ForeignKey("groups.id", ondelete="SET NULL"), nullable=True)
 
+    # Task #69 + #151 + #152: time windows this group is allowed to trade in.
+    # JSON array of {start: "HH:MM", end: "HH:MM", tz: "America/New_York"}.
+    # Empty/null = always tradeable. Example for Big Risk group:
+    #   [{"start":"18:00","end":"01:00","tz":"America/New_York"},
+    #    {"start":"11:45","end":"15:00","tz":"America/New_York"}]
+    # Cross-midnight windows (18:00-01:00) are supported. Executor checks
+    # current time in tz vs windows before firing entries.
+    time_windows = Column(JSON, nullable=True)
+    # Free-form label like "London Session" / "NY Session" / "Big Risk"
+    schedule_label = Column(String, nullable=True)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(
         DateTime(timezone=True),

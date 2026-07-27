@@ -2114,6 +2114,9 @@ class GroupCreate(BaseModel):
     min_active_count: int = 1
     # Phase 1.3: cascade — chain to another group when exhausted
     next_group_id: Optional[int] = None
+    # Tasks #69 + #151 + #152: time windows for scheduling
+    time_windows: Optional[list] = None
+    schedule_label: Optional[str] = None
 
 
 class GroupUpdate(BaseModel):
@@ -2128,6 +2131,8 @@ class GroupUpdate(BaseModel):
     min_active_count: Optional[int] = None
     # Phase 1.3: cascade
     next_group_id: Optional[int] = None
+    time_windows: Optional[list] = None
+    schedule_label: Optional[str] = None
     # Allow clearing next_group_id via explicit null. Pydantic v2:
     # any None in the payload triggers the None default — so we treat
     # setting = null as "clear the FK" by checking the raw dict at PATCH time.
@@ -2185,6 +2190,9 @@ def _group_to_dict(g: Group, include_members: bool = True) -> dict:
         "min_active_count": getattr(g, "min_active_count", 1),
         # Phase 1.3 cascade
         "next_group_id": getattr(g, "next_group_id", None),
+        # Tasks #69 + #151 + #152: time windows
+        "time_windows": getattr(g, "time_windows", None) or [],
+        "schedule_label": getattr(g, "schedule_label", None),
         "created_at": g.created_at,
         "updated_at": g.updated_at,
     }
@@ -2305,6 +2313,8 @@ def update_group(group_id: int, data: GroupUpdate, key: str = "", db: Session = 
         "min_active_count",
         # Phase 1.3 cascade
         "next_group_id",
+        # Tasks #69 + #151 + #152: time windows
+        "time_windows", "schedule_label",
     ):
         v = getattr(data, field, None)
         if v is not None:
