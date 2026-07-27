@@ -1339,6 +1339,24 @@ def webhook_manual(data: TradeEngineWebhook, db: Session = Depends(get_db)):
     return webhook(data, db)
 
 
+@app.post("/api/webhook/trade-engine/group/{group_name}")
+def webhook_by_group(group_name: str, data: TradeEngineWebhook, db: Session = Depends(get_db)):
+    """Dynamic group routing — TradingView alert URL includes the group
+    name. Lets user run N alerts across N groups without any Pine edits.
+
+    Example URLs the user configures in TradingView:
+        .../api/webhook/trade-engine/group/group1_auto
+        .../api/webhook/trade-engine/group/group2_auto
+        .../api/webhook/trade-engine/group/group3_manual
+
+    Each URL points at the same server but auto-tags the signal with a
+    different group name → fans out to that group's active members.
+    """
+    if not data.group:
+        data.group = group_name
+    return webhook(data, db)
+
+
 @app.post("/api/webhook/trade-engine")
 def webhook(data: TradeEngineWebhook, db: Session = Depends(get_db)):
     if data.key != os.getenv("USER_KEY", "trading123"):
@@ -1828,8 +1846,10 @@ def update_account(account_id: int, data: AccountUpdate, key: str = "", db: Sess
     if not a:
         raise HTTPException(status_code=404, detail="account not found")
     for field in ("name", "account_id", "env", "multiplier", "daily_loss_limit",
-                   "active", "paused", "config"):
-        v = getattr(data, field)
+                   "active", "paused", "config",
+                   # Phase 1.2 rotation overrides
+                   "state", "wins_cycle", "losses_cycle", "pnl_cycle"):
+        v = getattr(data, field, None)
         if v is not None:
             setattr(a, field, v)
     db.commit()
@@ -1859,7 +1879,16 @@ def create_group(data: GroupCreate, key: str = "", db: Session = Depends(get_db)
     _admin_check(key)
     if db.query(Group).filter(Group.name == data.name).first():
         raise HTTPException(status_code=409, detail=f"group '{data.name}' already exists")
-    g = Group(name=data.name, description=data.description, active=data.active)
+    g = Group(
+        name=data.name,
+        description=data.description,
+        active=data.active,
+        rotate_after_wins=data.rotate_after_wins,
+        rotate_after_losses=data.rotate_after_losses,
+        rotate_after_profit=data.rotate_after_profit,
+        rotate_after_loss_pnl=data.rotate_after_loss_pnl,
+        min_active_count=data.min_active_count,
+    )
     db.add(g)
     db.commit()
     db.refresh(g)
@@ -1872,8 +1901,14 @@ def update_group(group_id: int, data: GroupUpdate, key: str = "", db: Session = 
     g = db.query(Group).filter(Group.id == group_id).first()
     if not g:
         raise HTTPException(status_code=404, detail="group not found")
-    for field in ("name", "description", "active"):
-        v = getattr(data, field)
+    for field in (
+        "name", "description", "active",
+        # Phase 1.2 rotation rules
+        "rotate_after_wins", "rotate_after_losses",
+        "rotate_after_profit", "rotate_after_loss_pnl",
+        "min_active_count",
+    ):
+        v = getattr(data, field, None)
         if v is not None:
             setattr(g, field, v)
     db.commit()
