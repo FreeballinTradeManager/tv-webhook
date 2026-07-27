@@ -319,6 +319,27 @@ class Strategy(Base):
     default_group_id = Column(Integer, ForeignKey("groups.id", ondelete="SET NULL"),
                               nullable=True, index=True)
 
+    # Task #127: per-strategy alert JSON template + broker format.
+    # broker_format determines the shape of the JSON we suggest for
+    # copy-paste into TradingView alerts:
+    #   'futures'  → Tradovate/Rithmic style (contract symbols, qty in contracts)
+    #   'mt5'      → MT4/5 style (volume in lots, symbol like EURUSD)
+    #   'forex'    → forex/cfd style
+    #   'stocks'   → equity brokers (Alpaca/IBKR)
+    #   'crypto'   → crypto broker style
+    # Switching this on a strategy lets you take the SAME Pine indicator
+    # and reroute it from a Tradovate futures prop firm to an MT5 forex
+    # prop firm without editing Pine — just regenerate the alert JSON.
+    broker_format = Column(String, nullable=True, default="futures")
+    # User-supplied alert JSON overrides the auto-generated template.
+    # Stored as string (JSON with {placeholders}) so we don't have to
+    # validate at write-time. Frontend copies this into TradingView.
+    alert_json_template = Column(Text, nullable=True)
+    # Free-form: 'What does this webhook do?' e.g.
+    #   '6.24 base fires ENTRY on 3EMA cross + CD confirm.
+    #    Runs on 5min MNQ. Fans out to group1_auto for Apex + Lucid rotation.'
+    alert_description = Column(Text, nullable=True)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(
         DateTime(timezone=True),

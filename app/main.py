@@ -2404,6 +2404,10 @@ class StrategyIn(BaseModel):
     webhook_slug: Optional[str] = None
     webhook_key: Optional[str] = None
     default_group_id: Optional[int] = None
+    # Task #127: alert JSON + broker format
+    broker_format: Optional[str] = "futures"
+    alert_json_template: Optional[str] = None
+    alert_description: Optional[str] = None
 
 
 class StrategyPatch(BaseModel):
@@ -2420,6 +2424,151 @@ class StrategyPatch(BaseModel):
     webhook_slug: Optional[str] = None
     webhook_key: Optional[str] = None
     default_group_id: Optional[int] = None
+    broker_format: Optional[str] = None
+    alert_json_template: Optional[str] = None
+    alert_description: Optional[str] = None
+
+
+# Task #127: pre-canned alert JSON templates per broker format + event.
+# Rendered on demand via /api/strategies/{id}/alert-templates so the
+# Strategies page can show a "Copy JSON" button. {{placeholders}} get
+# replaced with strategy-specific values at render time.
+
+def _webhook_url_for(slug: str) -> str:
+    base = (os.getenv("RAILWAY_PUBLIC_DOMAIN") or "").rstrip("/")
+    if base and not base.startswith("http"):
+        base = f"https://{base}"
+    return f"{base}/api/webhook/strategy/{slug}" if base else f"/api/webhook/strategy/{slug}"
+
+
+def _alert_templates(strategy: Strategy) -> dict:
+    """Return { event_type: { url, json_body, description } } for the
+    strategy's broker_format. Each entry is ready to paste into a
+    TradingView alert."""
+    slug = strategy.webhook_slug or "STRATEGY_SLUG"
+    key = strategy.webhook_key or "STRATEGY_KEY"
+    fmt = (strategy.broker_format or "futures").lower()
+    url = _webhook_url_for(slug)
+
+    # Common fields across all formats
+    common = {"key": key, "strategy": strategy.name}
+
+    if fmt in ("futures", "tradovate"):
+        # Futures — Tradovate/Rithmic. qty is CONTRACTS.
+        return {
+            "ENTRY": {
+                "url": url, "method": "POST",
+                "description": f"Open a new {fmt} position. qty = contracts. Fires from Pine on setup.",
+                "json_body": {
+                    **common, "event": "ENTRY",
+                    "ticker": "{{ticker}}", "side": "{{strategy.order.action}}",
+                    "qty": 1,
+                    "entry_px": "{{close}}",
+                    "stop_px": "{{plot('stop')}}",
+                    "tp1_px": "{{plot('tp1')}}", "tp1_qty": 1,
+                    "trade_id": f"{slug}-{{{{time}}}}-{{{{strategy.order.action}}}}",
+                },
+            },
+            "STOP_UPDATE": {
+                "url": url, "method": "POST",
+                "description": "Move the stop loss on the open position (BE / trail / jump).",
+                "json_body": {
+                    **common, "event": "STOP_UPDATE",
+                    "ticker": "{{ticker}}", "stop_px": "{{plot('stop')}}",
+                    "stop_source": "TRAIL",
+                    "trade_id": "{{plot('trade_id')}}",
+                },
+            },
+            "FLAT": {
+                "url": url, "method": "POST",
+                "description": "Close the entire position (STOP_HIT / MASTER_CLOSE / manual FLAT).",
+                "json_body": {
+                    **common, "event": "FLAT",
+                    "ticker": "{{ticker}}",
+                    "trade_id": "{{plot('trade_id')}}",
+                },
+            },
+        }
+
+    elif fmt in ("mt5", "mt4", "forex"):
+        # MT4/5 or forex — volume in LOTS (0.01 = micro, 0.1 = mini, 1.0 = standard)
+        return {
+            "ENTRY": {
+                "url": url, "method": "POST",
+                "description": f"Open a new {fmt} position. volume in lots (0.01 micro / 0.1 mini / 1.0 std).",
+                "json_body": {
+                    **common, "event": "ENTRY",
+                    "ticker": "{{ticker}}", "side": "{{strategy.order.action}}",
+                    "volume": 0.10,
+                    "entry_px": "{{close}}",
+                    "stop_px": "{{plot('stop')}}",
+                    "tp1_px": "{{plot('tp1')}}",
+                    "trade_id": f"{slug}-{{{{time}}}}-{{{{strategy.order.action}}}}",
+                    "broker_format": fmt,
+                },
+            },
+            "STOP_UPDATE": {
+                "url": url, "method": "POST",
+                "description": "Move the stop loss on the open MT4/5 order.",
+                "json_body": {
+                    **common, "event": "STOP_UPDATE",
+                    "ticker": "{{ticker}}", "stop_px": "{{plot('stop')}}",
+                    "trade_id": "{{plot('trade_id')}}",
+                    "broker_format": fmt,
+                },
+            },
+            "FLAT": {
+                "url": url, "method": "POST",
+                "description": "Close the MT4/5 order.",
+                "json_body": {
+                    **common, "event": "FLAT",
+                    "ticker": "{{ticker}}",
+                    "trade_id": "{{plot('trade_id')}}",
+                    "broker_format": fmt,
+                },
+            },
+        }
+
+    elif fmt in ("stocks", "alpaca", "ibkr"):
+        # Stocks / equities — qty in SHARES
+        return {
+            "ENTRY": {
+                "url": url, "method": "POST",
+                "description": "Open a stock position. qty = shares.",
+                "json_body": {
+                    **common, "event": "ENTRY",
+                    "ticker": "{{ticker}}", "side": "{{strategy.order.action}}",
+                    "qty": 100,
+                    "entry_px": "{{close}}",
+                    "stop_px": "{{plot('stop')}}",
+                    "trade_id": f"{slug}-{{{{time}}}}-{{{{strategy.order.action}}}}",
+                    "broker_format": fmt,
+                },
+            },
+            "FLAT": {
+                "url": url, "method": "POST",
+                "description": "Close the stock position (sell shares).",
+                "json_body": {
+                    **common, "event": "FLAT",
+                    "ticker": "{{ticker}}",
+                    "trade_id": "{{plot('trade_id')}}",
+                    "broker_format": fmt,
+                },
+            },
+        }
+
+    # Default fallback = generic Trade Engine shape
+    return {
+        "ENTRY": {
+            "url": url, "method": "POST",
+            "description": "Generic entry. qty semantics depend on broker adapter.",
+            "json_body": {
+                **common, "event": "ENTRY",
+                "ticker": "{{ticker}}", "side": "{{strategy.order.action}}", "qty": 1,
+                "trade_id": f"{slug}-{{{{time}}}}-{{{{strategy.order.action}}}}",
+            },
+        },
+    }
 
 
 def _slugify(text: str) -> str:
@@ -2442,18 +2591,35 @@ def _strategy_to_dict(s: Strategy, request_base_url: str = "") -> dict:
         "webhook_slug": getattr(s, "webhook_slug", None),
         "webhook_key": getattr(s, "webhook_key", None),
         "default_group_id": getattr(s, "default_group_id", None),
+        "broker_format": getattr(s, "broker_format", "futures") or "futures",
+        "alert_json_template": getattr(s, "alert_json_template", None),
+        "alert_description": getattr(s, "alert_description", None),
         "created_at": s.created_at.isoformat() if s.created_at else None,
         "updated_at": s.updated_at.isoformat() if s.updated_at else None,
     }
-    # Convenience: full webhook URL the trader can paste into TradingView
+    # Convenience: full webhook URL + auto-generated templates the trader
+    # can paste into TradingView.
     if d["webhook_slug"]:
-        # Frontend can override with its own origin, but we surface a
-        # reasonable default from RAILWAY_PUBLIC_DOMAIN env var if present.
-        base = (os.getenv("RAILWAY_PUBLIC_DOMAIN") or "").rstrip("/")
-        if base and not base.startswith("http"):
-            base = f"https://{base}"
-        d["webhook_url"] = f"{base}/api/webhook/strategy/{d['webhook_slug']}" if base else f"/api/webhook/strategy/{d['webhook_slug']}"
+        d["webhook_url"] = _webhook_url_for(d["webhook_slug"])
+        d["alert_templates"] = _alert_templates(s)
     return d
+
+
+@app.get("/api/strategies/{sid}/alert-templates")
+def strategy_alert_templates(sid: int, db: Session = Depends(get_db)):
+    """Return pre-canned TradingView alert JSON blocks for the strategy's
+    broker_format (futures/mt5/forex/stocks). One entry per event type
+    (ENTRY/STOP_UPDATE/FLAT). Frontend renders 'Copy' buttons for each.
+    Switching broker_format on the strategy changes the templates —
+    useful for moving the same Pine indicator from a Tradovate futures
+    prop firm to an MT5 forex prop firm without editing Pine."""
+    s = db.query(Strategy).filter(Strategy.id == sid).first()
+    if not s: raise HTTPException(status_code=404, detail="strategy not found")
+    return {
+        "strategy": {"id": s.id, "name": s.name, "broker_format": s.broker_format or "futures"},
+        "webhook_url": _webhook_url_for(s.webhook_slug or ""),
+        "templates": _alert_templates(s),
+    }
 
 
 @app.get("/api/strategies")

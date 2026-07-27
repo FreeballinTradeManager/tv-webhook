@@ -143,6 +143,11 @@ MIGRATIONS = [
     "ALTER TABLE strategies ADD COLUMN IF NOT EXISTS default_group_id INTEGER",
     "CREATE UNIQUE INDEX IF NOT EXISTS ix_strategies_webhook_slug ON strategies (webhook_slug) WHERE webhook_slug IS NOT NULL",
 
+    # Task #127: alert JSON template + broker format per strategy.
+    "ALTER TABLE strategies ADD COLUMN IF NOT EXISTS broker_format TEXT DEFAULT 'futures'",
+    "ALTER TABLE strategies ADD COLUMN IF NOT EXISTS alert_json_template TEXT",
+    "ALTER TABLE strategies ADD COLUMN IF NOT EXISTS alert_description TEXT",
+
     # Phase 2.1b: extend positions with Base44 Trade shape fields so we can
     # serve /api/trades from the same table. Nullable — legacy positions
     # keep working.
