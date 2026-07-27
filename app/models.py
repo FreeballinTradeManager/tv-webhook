@@ -306,6 +306,19 @@ class Strategy(Base):
     total_profit = Column(Float, nullable=False, default=0.0)
     is_active = Column(Boolean, nullable=False, default=True)
 
+    # Task #119 + #120: strategy-scoped webhook URL binding.
+    # Each strategy gets its own unique webhook slug — Pine alerts hit
+    # /api/webhook/strategy/{webhook_slug}. Server looks up the strategy,
+    # verifies its per-strategy webhook_key, then fans out into
+    # default_group (which owns rotation across accounts).
+    # This is what makes "one URL per Pine indicator" work.
+    webhook_slug = Column(String, nullable=True, unique=True, index=True)
+    webhook_key = Column(String, nullable=True)   # per-strategy auth
+    # The Group this strategy fires into. NULL = strategy can only be
+    # invoked via legacy group-based URLs, not strategy-scoped.
+    default_group_id = Column(Integer, ForeignKey("groups.id", ondelete="SET NULL"),
+                              nullable=True, index=True)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(
         DateTime(timezone=True),

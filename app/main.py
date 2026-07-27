@@ -1644,6 +1644,50 @@ def webhook_by_group(group_name: str, data: TradeEngineWebhook, db: Session = De
     return webhook(data, db)
 
 
+@app.post("/api/webhook/strategy/{slug}")
+def webhook_by_strategy(slug: str, data: TradeEngineWebhook, db: Session = Depends(get_db)):
+    """Task #119: strategy-scoped webhook URL. Each Strategy has its own
+    unique webhook_slug. TradingView alert URL:
+        .../api/webhook/strategy/6-24-base
+        .../api/webhook/strategy/v2-72
+        .../api/webhook/strategy/tm-v20-88
+
+    This unlocks 'run same asset on multiple strategies simultaneously'
+    (task #147) — each strategy tags positions with its own strategy_id
+    so 6.24 MNQ trade ≠ TM MNQ trade in our DB, even on the same
+    account (unlike PMT which collapses them).
+
+    Auth is per-strategy: data.key must match strategy.webhook_key
+    (falls back to global USER_KEY for backwards-compat if strategy
+    doesn't have its own key set).
+    """
+    strat = db.query(Strategy).filter(Strategy.webhook_slug == slug).first()
+    if not strat:
+        raise HTTPException(status_code=404, detail=f"strategy slug '{slug}' not found")
+    if not strat.is_active:
+        raise HTTPException(status_code=403, detail=f"strategy '{strat.name}' is inactive")
+
+    # Auth: prefer strategy's own key; fall back to global USER_KEY
+    expected_key = strat.webhook_key or os.getenv("USER_KEY", "trading123")
+    if data.key != expected_key:
+        raise HTTPException(status_code=401, detail="Invalid webhook key")
+
+    # Route into the strategy's designated group, if bound
+    if not data.group and strat.default_group_id:
+        grp = db.query(Group).filter(Group.id == strat.default_group_id).first()
+        if grp:
+            data.group = grp.name
+
+    # Stamp strategy metadata so downstream position insert can tag it.
+    # We hijack the `source` field of the payload as a low-touch way to
+    # carry strategy_id through the existing dedup + executor path
+    # without a new schema field. The webhook handler will surface it
+    # when it builds the Position row.
+    data.source = f"strategy:{strat.id}:{strat.name}"
+
+    return webhook(data, db)
+
+
 @app.post("/api/webhook/trade-engine")
 def webhook(data: TradeEngineWebhook, db: Session = Depends(get_db)):
     if data.key != os.getenv("USER_KEY", "trading123"):
@@ -2356,6 +2400,10 @@ class StrategyIn(BaseModel):
     total_trades: Optional[int] = 0
     total_profit: Optional[float] = 0.0
     is_active: Optional[bool] = True
+    # Task #119: webhook binding — server auto-generates if not provided
+    webhook_slug: Optional[str] = None
+    webhook_key: Optional[str] = None
+    default_group_id: Optional[int] = None
 
 
 class StrategyPatch(BaseModel):
@@ -2369,18 +2417,43 @@ class StrategyPatch(BaseModel):
     total_trades: Optional[int] = None
     total_profit: Optional[float] = None
     is_active: Optional[bool] = None
+    webhook_slug: Optional[str] = None
+    webhook_key: Optional[str] = None
+    default_group_id: Optional[int] = None
 
 
-def _strategy_to_dict(s: Strategy) -> dict:
-    return {
+def _slugify(text: str) -> str:
+    """Turn a strategy name into a URL-safe slug for the webhook URL.
+    'Freeballin 6.24 base' → 'freeballin-6-24-base'"""
+    import re
+    s = (text or "").lower().strip()
+    s = re.sub(r'[^a-z0-9]+', '-', s)
+    s = re.sub(r'-+', '-', s).strip('-')
+    return s or "strategy"
+
+
+def _strategy_to_dict(s: Strategy, request_base_url: str = "") -> dict:
+    d = {
         "id": s.id, "name": s.name, "description": s.description, "rules": s.rules,
         "timeframe": s.timeframe, "preferred_session": s.preferred_session,
         "preferred_pairs": s.preferred_pairs, "win_rate": s.win_rate,
         "total_trades": s.total_trades, "total_profit": s.total_profit,
         "is_active": s.is_active,
+        "webhook_slug": getattr(s, "webhook_slug", None),
+        "webhook_key": getattr(s, "webhook_key", None),
+        "default_group_id": getattr(s, "default_group_id", None),
         "created_at": s.created_at.isoformat() if s.created_at else None,
         "updated_at": s.updated_at.isoformat() if s.updated_at else None,
     }
+    # Convenience: full webhook URL the trader can paste into TradingView
+    if d["webhook_slug"]:
+        # Frontend can override with its own origin, but we surface a
+        # reasonable default from RAILWAY_PUBLIC_DOMAIN env var if present.
+        base = (os.getenv("RAILWAY_PUBLIC_DOMAIN") or "").rstrip("/")
+        if base and not base.startswith("http"):
+            base = f"https://{base}"
+        d["webhook_url"] = f"{base}/api/webhook/strategy/{d['webhook_slug']}" if base else f"/api/webhook/strategy/{d['webhook_slug']}"
+    return d
 
 
 @app.get("/api/strategies")
@@ -2391,7 +2464,20 @@ def list_strategies(db: Session = Depends(get_db)):
 @app.post("/api/strategies")
 def create_strategy(data: StrategyIn, key: str = "", db: Session = Depends(get_db)):
     _admin_check(key)
-    s = Strategy(**data.dict(exclude_unset=True))
+    payload = data.dict(exclude_unset=True)
+    # Auto-generate webhook_slug + webhook_key if not provided
+    if not payload.get("webhook_slug"):
+        base_slug = _slugify(payload.get("name", "strategy"))
+        # Ensure uniqueness — append suffix if collision
+        slug = base_slug
+        n = 1
+        while db.query(Strategy).filter(Strategy.webhook_slug == slug).first():
+            n += 1
+            slug = f"{base_slug}-{n}"
+        payload["webhook_slug"] = slug
+    if not payload.get("webhook_key"):
+        payload["webhook_key"] = _uuid.uuid4().hex
+    s = Strategy(**payload)
     db.add(s); db.commit(); db.refresh(s)
     return _strategy_to_dict(s)
 

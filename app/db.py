@@ -137,6 +137,12 @@ MIGRATIONS = [
     "ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS trading_rules JSON",
     "ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS welcome_message TEXT",
 
+    # Task #119 + #120: strategy-scoped webhooks + group binding.
+    "ALTER TABLE strategies ADD COLUMN IF NOT EXISTS webhook_slug TEXT",
+    "ALTER TABLE strategies ADD COLUMN IF NOT EXISTS webhook_key TEXT",
+    "ALTER TABLE strategies ADD COLUMN IF NOT EXISTS default_group_id INTEGER",
+    "CREATE UNIQUE INDEX IF NOT EXISTS ix_strategies_webhook_slug ON strategies (webhook_slug) WHERE webhook_slug IS NOT NULL",
+
     # Phase 2.1b: extend positions with Base44 Trade shape fields so we can
     # serve /api/trades from the same table. Nullable — legacy positions
     # keep working.
