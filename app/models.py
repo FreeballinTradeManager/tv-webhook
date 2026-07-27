@@ -261,3 +261,86 @@ class GroupMember(Base):
 
     group = relationship("Group", back_populates="members")
     account = relationship("Account", back_populates="group_memberships")
+
+
+# ---------------------------------------------------------------------------
+# Phase 2.1a: Strategy + Alert + UserSettings (Base44 entity parity)
+# ---------------------------------------------------------------------------
+
+class Strategy(Base):
+    __tablename__ = "strategies"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    description = Column(Text, nullable=True)
+    # Free-form entry rules. Rendered as pre-entry checklist on NewTrade
+    # (task #76 setup playbook uses this same field).
+    rules = Column(Text, nullable=True)
+    timeframe = Column(String, nullable=False, default="15m")
+    preferred_session = Column(String, nullable=True)
+    # JSON array of preferred symbols
+    preferred_pairs = Column(JSON, nullable=True)
+
+    # Aggregate counters — updated on trade close, cheaper than
+    # recomputing from positions table on every dashboard load
+    win_rate = Column(Float, nullable=False, default=0.0)
+    total_trades = Column(Integer, nullable=False, default=0)
+    total_profit = Column(Float, nullable=False, default=0.0)
+    is_active = Column(Boolean, nullable=False, default=True)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class TradeAlert(Base):
+    """Price alerts — separate from webhook_signals which is the trade
+    execution event stream. This table backs the Alerts page: user-created
+    price watchers that trigger notifications (Discord/SMS/etc.)."""
+    __tablename__ = "trade_alerts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String, nullable=False, index=True)
+    # "price" / "tp_hit" / "sl_hit" / "breakout" / "daily_level"
+    alert_type = Column(String, nullable=False)
+    target_price = Column(Float, nullable=True)
+    message = Column(Text, nullable=True)
+
+    is_triggered = Column(Boolean, nullable=False, default=False)
+    triggered_at = Column(DateTime(timezone=True), nullable=True)
+
+    notify_sound = Column(Boolean, nullable=False, default=True)
+    notify_email = Column(Boolean, nullable=False, default=False)
+    is_active = Column(Boolean, nullable=False, default=True)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class UserSettings(Base):
+    """Singleton row (id=1) holding this user's preferences.
+    Base44 Settings page reads/writes this via /api/user/me."""
+    __tablename__ = "user_settings"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    # Notification toggles — Base44 had: london_automation, ny_orb_strategy,
+    # daily_levels, support_community, enable_ai
+    notification_settings = Column(JSON, nullable=True)
+    # Alert config toggles — tp_hit, loss_alert, guardian_lock
+    alert_configuration = Column(JSON, nullable=True)
+    # Trader response popup config — win_popup: gold/grey, loss_popup: motivational/ai_advice
+    trader_response = Column(JSON, nullable=True)
+    # UI customization
+    desktop_header_text = Column(String, nullable=True, default="TradeCore")
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )

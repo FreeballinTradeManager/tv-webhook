@@ -4,3 +4,5 @@ sqlalchemy
 psycopg2-binary
 httpx
 websockets
+python-multipart
+aiofiles

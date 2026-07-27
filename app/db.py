@@ -119,6 +119,35 @@ MIGRATIONS = [
         END IF;
     END $$;
     """,
+
+    # Phase 2.1a: Base44 entity parity — strategies / trade_alerts /
+    # user_settings tables are auto-created by Base.metadata.create_all.
+    # Seed a singleton user_settings row so /api/user/me always resolves.
+    """
+    INSERT INTO user_settings (id, notification_settings, alert_configuration, trader_response, desktop_header_text)
+    VALUES (1, '{}'::json, '{}'::json, '{}'::json, 'TradeCore')
+    ON CONFLICT (id) DO NOTHING
+    """,
+
+    # Phase 2.1b: extend positions with Base44 Trade shape fields so we can
+    # serve /api/trades from the same table. Nullable — legacy positions
+    # keep working.
+    "ALTER TABLE positions ADD COLUMN IF NOT EXISTS symbol_alias TEXT",
+    "ALTER TABLE positions ADD COLUMN IF NOT EXISTS direction TEXT",
+    "ALTER TABLE positions ADD COLUMN IF NOT EXISTS pips DOUBLE PRECISION",
+    "ALTER TABLE positions ADD COLUMN IF NOT EXISTS session TEXT",
+    "ALTER TABLE positions ADD COLUMN IF NOT EXISTS lot_size DOUBLE PRECISION",
+    "ALTER TABLE positions ADD COLUMN IF NOT EXISTS risk_percentage DOUBLE PRECISION",
+    "ALTER TABLE positions ADD COLUMN IF NOT EXISTS risk_amount DOUBLE PRECISION",
+    "ALTER TABLE positions ADD COLUMN IF NOT EXISTS entry_time TIMESTAMPTZ",
+    "ALTER TABLE positions ADD COLUMN IF NOT EXISTS exit_time TIMESTAMPTZ",
+    "ALTER TABLE positions ADD COLUMN IF NOT EXISTS strategy_id INTEGER",
+    "ALTER TABLE positions ADD COLUMN IF NOT EXISTS trailing_stop_used BOOLEAN NOT NULL DEFAULT FALSE",
+    "ALTER TABLE positions ADD COLUMN IF NOT EXISTS trailing_stop_distance DOUBLE PRECISION",
+    "ALTER TABLE positions ADD COLUMN IF NOT EXISTS notes TEXT",
+    "ALTER TABLE positions ADD COLUMN IF NOT EXISTS screenshot_url TEXT",
+    "CREATE INDEX IF NOT EXISTS ix_positions_strategy_id ON positions (strategy_id)",
+    "CREATE INDEX IF NOT EXISTS ix_positions_session ON positions (session)",
 ]
 
 

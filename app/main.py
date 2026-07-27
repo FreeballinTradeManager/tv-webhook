@@ -2,16 +2,24 @@ import os
 import json
 from typing import Optional
 
-from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+import uuid as _uuid
+from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect, UploadFile, File
+from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy import func as sa_func
 
 from .db import get_db, run_migrations
 # Import models so SQLAlchemy registers tables before run_migrations() runs.
 from . import models  # noqa: F401
-from .models import WebhookSignal, Position, StopUpdate, Account, Group, GroupMember, BROKER_KINDS
+from .models import (
+    WebhookSignal, Position, StopUpdate, Account, Group, GroupMember, BROKER_KINDS,
+    Strategy, TradeAlert, UserSettings,
+)
 from .executor import execute_trade
 from .ws import manager as ws_manager
 from .assets import locked_pnl, live_pnl, point_value, asset_root
@@ -2328,3 +2336,440 @@ def delete_group_member(group_id: int, member_id: int, key: str = "", db: Sessio
     db.delete(m)
     db.commit()
     return {"deleted": True, "id": member_id}
+
+
+# ---------------------------------------------------------------------------
+# Phase 2.1 — Base44 entity endpoints (Strategy / Alert / Trades / Analytics /
+# Upload / User). Powers the React frontend at frontend/src.
+# ---------------------------------------------------------------------------
+
+# ----- Strategy CRUD -------------------------------------------------------
+
+class StrategyIn(BaseModel):
+    name: str
+    description: Optional[str] = None
+    rules: Optional[str] = None
+    timeframe: Optional[str] = "15m"
+    preferred_session: Optional[str] = None
+    preferred_pairs: Optional[list] = None
+    win_rate: Optional[float] = 0.0
+    total_trades: Optional[int] = 0
+    total_profit: Optional[float] = 0.0
+    is_active: Optional[bool] = True
+
+
+class StrategyPatch(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    rules: Optional[str] = None
+    timeframe: Optional[str] = None
+    preferred_session: Optional[str] = None
+    preferred_pairs: Optional[list] = None
+    win_rate: Optional[float] = None
+    total_trades: Optional[int] = None
+    total_profit: Optional[float] = None
+    is_active: Optional[bool] = None
+
+
+def _strategy_to_dict(s: Strategy) -> dict:
+    return {
+        "id": s.id, "name": s.name, "description": s.description, "rules": s.rules,
+        "timeframe": s.timeframe, "preferred_session": s.preferred_session,
+        "preferred_pairs": s.preferred_pairs, "win_rate": s.win_rate,
+        "total_trades": s.total_trades, "total_profit": s.total_profit,
+        "is_active": s.is_active,
+        "created_at": s.created_at.isoformat() if s.created_at else None,
+        "updated_at": s.updated_at.isoformat() if s.updated_at else None,
+    }
+
+
+@app.get("/api/strategies")
+def list_strategies(db: Session = Depends(get_db)):
+    return [_strategy_to_dict(s) for s in db.query(Strategy).order_by(Strategy.id).all()]
+
+
+@app.post("/api/strategies")
+def create_strategy(data: StrategyIn, key: str = "", db: Session = Depends(get_db)):
+    _admin_check(key)
+    s = Strategy(**data.dict(exclude_unset=True))
+    db.add(s); db.commit(); db.refresh(s)
+    return _strategy_to_dict(s)
+
+
+@app.get("/api/strategies/{sid}")
+def get_strategy(sid: int, db: Session = Depends(get_db)):
+    s = db.query(Strategy).filter(Strategy.id == sid).first()
+    if not s: raise HTTPException(status_code=404, detail="strategy not found")
+    return _strategy_to_dict(s)
+
+
+@app.patch("/api/strategies/{sid}")
+def update_strategy(sid: int, data: StrategyPatch, key: str = "", db: Session = Depends(get_db)):
+    _admin_check(key)
+    s = db.query(Strategy).filter(Strategy.id == sid).first()
+    if not s: raise HTTPException(status_code=404, detail="strategy not found")
+    for k, v in data.dict(exclude_unset=True).items():
+        setattr(s, k, v)
+    db.commit(); db.refresh(s)
+    return _strategy_to_dict(s)
+
+
+@app.delete("/api/strategies/{sid}")
+def delete_strategy(sid: int, key: str = "", db: Session = Depends(get_db)):
+    _admin_check(key)
+    s = db.query(Strategy).filter(Strategy.id == sid).first()
+    if not s: raise HTTPException(status_code=404, detail="strategy not found")
+    db.delete(s); db.commit()
+    return {"deleted": True, "id": sid}
+
+
+# ----- TradeAlert CRUD -----------------------------------------------------
+
+class AlertIn(BaseModel):
+    symbol: str
+    alert_type: str
+    target_price: Optional[float] = None
+    message: Optional[str] = None
+    notify_sound: Optional[bool] = True
+    notify_email: Optional[bool] = False
+    is_active: Optional[bool] = True
+
+
+class AlertPatch(BaseModel):
+    symbol: Optional[str] = None
+    alert_type: Optional[str] = None
+    target_price: Optional[float] = None
+    message: Optional[str] = None
+    is_triggered: Optional[bool] = None
+    notify_sound: Optional[bool] = None
+    notify_email: Optional[bool] = None
+    is_active: Optional[bool] = None
+
+
+def _alert_to_dict(a: TradeAlert) -> dict:
+    return {
+        "id": a.id, "symbol": a.symbol, "alert_type": a.alert_type,
+        "target_price": a.target_price, "message": a.message,
+        "is_triggered": a.is_triggered,
+        "triggered_at": a.triggered_at.isoformat() if a.triggered_at else None,
+        "notify_sound": a.notify_sound, "notify_email": a.notify_email,
+        "is_active": a.is_active,
+        "created_at": a.created_at.isoformat() if a.created_at else None,
+    }
+
+
+@app.get("/api/alerts")
+def list_alerts(db: Session = Depends(get_db)):
+    return [_alert_to_dict(a) for a in db.query(TradeAlert).order_by(TradeAlert.id.desc()).all()]
+
+
+@app.post("/api/alerts")
+def create_alert(data: AlertIn, key: str = "", db: Session = Depends(get_db)):
+    _admin_check(key)
+    a = TradeAlert(**data.dict(exclude_unset=True))
+    db.add(a); db.commit(); db.refresh(a)
+    return _alert_to_dict(a)
+
+
+@app.patch("/api/alerts/{aid}")
+def update_alert(aid: int, data: AlertPatch, key: str = "", db: Session = Depends(get_db)):
+    _admin_check(key)
+    a = db.query(TradeAlert).filter(TradeAlert.id == aid).first()
+    if not a: raise HTTPException(status_code=404, detail="alert not found")
+    for k, v in data.dict(exclude_unset=True).items():
+        setattr(a, k, v)
+    db.commit(); db.refresh(a)
+    return _alert_to_dict(a)
+
+
+@app.delete("/api/alerts/{aid}")
+def delete_alert(aid: int, key: str = "", db: Session = Depends(get_db)):
+    _admin_check(key)
+    a = db.query(TradeAlert).filter(TradeAlert.id == aid).first()
+    if not a: raise HTTPException(status_code=404, detail="alert not found")
+    db.delete(a); db.commit()
+    return {"deleted": True, "id": aid}
+
+
+# ----- Trades = Positions in Base44 shape ----------------------------------
+# The React NewTrade form and Trades page speak the Base44 Trade schema.
+# Under the hood we store rows in the same `positions` table — those new
+# columns (direction/session/pips/etc.) came in via the Phase 2.1b migration.
+
+class TradeIn(BaseModel):
+    account_id: Optional[int] = None
+    symbol: str
+    direction: str = "long"      # long / short
+    entry_price: float
+    exit_price: Optional[float] = None
+    stop_loss: Optional[float] = None
+    take_profit_1: Optional[float] = None
+    take_profit_2: Optional[float] = None
+    take_profit_3: Optional[float] = None
+    lot_size: Optional[float] = None
+    risk_percentage: Optional[float] = None
+    risk_amount: Optional[float] = None
+    profit_loss: Optional[float] = None
+    pips: Optional[float] = None
+    entry_time: Optional[str] = None
+    exit_time: Optional[str] = None
+    session: Optional[str] = None
+    strategy_id: Optional[int] = None
+    trailing_stop_used: Optional[bool] = False
+    trailing_stop_distance: Optional[float] = None
+    status: Optional[str] = "CLOSED"
+    notes: Optional[str] = None
+    screenshot_url: Optional[str] = None
+
+
+def _trade_to_dict(p: Position) -> dict:
+    """Position row → Base44 Trade shape (what the React pages expect)."""
+    return {
+        "id": p.id,
+        "trade_id": p.trade_id,
+        "account_id": p.account_id,
+        "symbol": p.ticker,
+        "direction": (p.direction or ("long" if (p.side or "").upper() == "LONG" else "short")),
+        "entry_price": p.entry_price,
+        "exit_price": p.avg_fill_price if p.status == "CLOSED" else None,
+        "stop_loss": p.stop_price,
+        "take_profit_1": p.tp1_px, "take_profit_2": p.tp2_px, "take_profit_3": p.tp3_px,
+        "lot_size": p.lot_size,
+        "risk_percentage": p.risk_percentage,
+        "risk_amount": p.risk_amount,
+        "profit_loss": p.realized_pnl,
+        "pips": p.pips,
+        "entry_time": p.entry_time.isoformat() if p.entry_time else (p.created_at.isoformat() if p.created_at else None),
+        "exit_time": p.exit_time.isoformat() if p.exit_time else None,
+        "session": p.session,
+        "strategy_id": p.strategy_id,
+        "trailing_stop_used": p.trailing_stop_used,
+        "trailing_stop_distance": p.trailing_stop_distance,
+        "status": (p.status or "").lower() if p.status else "closed",
+        "notes": p.notes,
+        "screenshot_url": p.screenshot_url,
+        "group_name": p.group_name,
+        "broker": p.broker,
+        "created_at": p.created_at.isoformat() if p.created_at else None,
+    }
+
+
+@app.get("/api/trades")
+def list_trades(limit: int = 200, db: Session = Depends(get_db)):
+    q = db.query(Position).order_by(Position.id.desc()).limit(limit).all()
+    return [_trade_to_dict(p) for p in q]
+
+
+@app.post("/api/trades")
+def create_trade(data: TradeIn, key: str = "", db: Session = Depends(get_db)):
+    _admin_check(key)
+    # Generate a synthetic trade_id for manual entries so the unique constraint
+    # holds. Manual entries prefix with MAN- so they're distinguishable in logs.
+    trade_id = f"MAN-{_uuid.uuid4().hex[:12]}"
+    entry_time = None
+    exit_time = None
+    if data.entry_time:
+        try: entry_time = datetime.fromisoformat(data.entry_time.replace("Z", "+00:00"))
+        except Exception: pass
+    if data.exit_time:
+        try: exit_time = datetime.fromisoformat(data.exit_time.replace("Z", "+00:00"))
+        except Exception: pass
+
+    side = "LONG" if (data.direction or "long").lower() == "long" else "SHORT"
+    qty = int(data.lot_size or 1)
+    p = Position(
+        trade_id=trade_id, ticker=data.symbol, side=side, direction=data.direction,
+        qty_total=qty, qty_open=qty if not data.exit_price else 0,
+        entry_price=data.entry_price, stop_price=data.stop_loss,
+        tp1_px=data.take_profit_1, tp2_px=data.take_profit_2, tp3_px=data.take_profit_3,
+        status=(data.status or "CLOSED").upper(),
+        account_id=data.account_id, strategy_id=data.strategy_id,
+        lot_size=data.lot_size, risk_percentage=data.risk_percentage,
+        risk_amount=data.risk_amount, realized_pnl=data.profit_loss,
+        pips=data.pips, session=data.session, entry_time=entry_time, exit_time=exit_time,
+        trailing_stop_used=data.trailing_stop_used or False,
+        trailing_stop_distance=data.trailing_stop_distance,
+        notes=data.notes, screenshot_url=data.screenshot_url,
+        avg_fill_price=data.exit_price, broker="manual",
+    )
+    db.add(p); db.commit(); db.refresh(p)
+    return _trade_to_dict(p)
+
+
+@app.patch("/api/trades/{tid}")
+def update_trade(tid: int, data: TradeIn, key: str = "", db: Session = Depends(get_db)):
+    _admin_check(key)
+    p = db.query(Position).filter(Position.id == tid).first()
+    if not p: raise HTTPException(status_code=404, detail="trade not found")
+    # Only fields explicitly set get updated
+    payload = data.dict(exclude_unset=True)
+    for k, v in payload.items():
+        if k == "symbol": p.ticker = v
+        elif k in ("entry_time", "exit_time") and v:
+            try: setattr(p, k, datetime.fromisoformat(v.replace("Z", "+00:00")))
+            except Exception: pass
+        elif k == "profit_loss": p.realized_pnl = v
+        elif k == "exit_price": p.avg_fill_price = v
+        elif k == "stop_loss": p.stop_price = v
+        elif k == "take_profit_1": p.tp1_px = v
+        elif k == "take_profit_2": p.tp2_px = v
+        elif k == "take_profit_3": p.tp3_px = v
+        elif k == "status" and v: p.status = v.upper()
+        elif hasattr(p, k): setattr(p, k, v)
+    db.commit(); db.refresh(p)
+    return _trade_to_dict(p)
+
+
+@app.delete("/api/trades/{tid}")
+def delete_trade(tid: int, key: str = "", db: Session = Depends(get_db)):
+    _admin_check(key)
+    p = db.query(Position).filter(Position.id == tid).first()
+    if not p: raise HTTPException(status_code=404, detail="trade not found")
+    db.delete(p); db.commit()
+    return {"deleted": True, "id": tid}
+
+
+# ----- Analytics -----------------------------------------------------------
+
+@app.get("/api/analytics")
+def analytics(account_id: Optional[int] = None, db: Session = Depends(get_db)):
+    """Win rate, session breakdown, equity curve. Base44 Analytics page can
+    compute this client-side from Trade.list() but this endpoint returns
+    pre-aggregated values for faster load + future caching."""
+    q = db.query(Position).filter(Position.status == "CLOSED")
+    if account_id:
+        q = q.filter(Position.account_id == account_id)
+    q = q.filter(Position.realized_pnl.isnot(None))
+    q = q.order_by(Position.created_at.asc())
+    rows = q.all()
+
+    if not rows:
+        return {"total_trades": 0, "win_rate": 0, "net_profit": 0,
+                "profit_factor": 0, "expectancy": 0, "avg_win": 0, "avg_loss": 0,
+                "equity_curve": [], "session_breakdown": {}}
+
+    wins = [p for p in rows if (p.realized_pnl or 0) > 0]
+    losses = [p for p in rows if (p.realized_pnl or 0) < 0]
+    total_win = sum(p.realized_pnl or 0 for p in wins)
+    total_loss = sum(p.realized_pnl or 0 for p in losses)
+    total = len(rows)
+    win_rate = len(wins) / total * 100 if total else 0
+    net_profit = total_win + total_loss
+    profit_factor = abs(total_win / total_loss) if total_loss else float("inf")
+    avg_win = total_win / len(wins) if wins else 0
+    avg_loss = abs(total_loss / len(losses)) if losses else 0
+    expectancy = (win_rate / 100 * avg_win) - ((100 - win_rate) / 100 * avg_loss)
+
+    equity = 0
+    equity_curve = []
+    for i, p in enumerate(rows):
+        equity += p.realized_pnl or 0
+        equity_curve.append({"name": f"Trade {i+1}", "equity": round(equity, 2)})
+
+    session_breakdown = {}
+    for p in rows:
+        s = p.session or "unknown"
+        session_breakdown.setdefault(s, {"profit": 0, "count": 0})
+        session_breakdown[s]["profit"] += p.realized_pnl or 0
+        session_breakdown[s]["count"] += 1
+
+    return {
+        "total_trades": total,
+        "win_rate": round(win_rate, 2),
+        "net_profit": round(net_profit, 2),
+        "profit_factor": round(profit_factor, 2) if profit_factor != float("inf") else None,
+        "expectancy": round(expectancy, 2),
+        "avg_win": round(avg_win, 2),
+        "avg_loss": round(avg_loss, 2),
+        "equity_curve": equity_curve,
+        "session_breakdown": session_breakdown,
+    }
+
+
+# ----- File upload (trade screenshots) -------------------------------------
+
+UPLOAD_DIR = Path(__file__).parent / "static" / "uploads"
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+
+@app.post("/api/upload")
+async def upload_file(key: str = "", file: UploadFile = File(...)):
+    _admin_check(key)
+    ext = Path(file.filename or "").suffix.lower() or ".bin"
+    if ext not in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".pdf"}:
+        raise HTTPException(status_code=400, detail=f"unsupported extension {ext}")
+    name = f"{_uuid.uuid4().hex}{ext}"
+    dest = UPLOAD_DIR / name
+    content = await file.read()
+    with open(dest, "wb") as f:
+        f.write(content)
+    return {"file_url": f"/static/uploads/{name}", "filename": file.filename, "size": len(content)}
+
+
+# ----- User settings (singleton row id=1) ----------------------------------
+
+class UserSettingsPatch(BaseModel):
+    notification_settings: Optional[dict] = None
+    alert_configuration: Optional[dict] = None
+    trader_response: Optional[dict] = None
+    desktop_header_text: Optional[str] = None
+
+
+def _user_to_dict(u: UserSettings) -> dict:
+    return {
+        "id": u.id,
+        "notification_settings": u.notification_settings or {},
+        "alert_configuration": u.alert_configuration or {},
+        "trader_response": u.trader_response or {},
+        "desktop_header_text": u.desktop_header_text or "TradeCore",
+        "updated_at": u.updated_at.isoformat() if u.updated_at else None,
+    }
+
+
+@app.get("/api/user/me")
+def get_user_me(db: Session = Depends(get_db)):
+    u = db.query(UserSettings).filter(UserSettings.id == 1).first()
+    if not u:
+        # Migration seeds row 1; this fallback covers first-boot edge cases.
+        u = UserSettings(id=1, notification_settings={}, alert_configuration={},
+                         trader_response={}, desktop_header_text="TradeCore")
+        db.add(u); db.commit(); db.refresh(u)
+    return _user_to_dict(u)
+
+
+@app.patch("/api/user/me")
+def update_user_me(data: UserSettingsPatch, key: str = "", db: Session = Depends(get_db)):
+    _admin_check(key)
+    u = db.query(UserSettings).filter(UserSettings.id == 1).first()
+    if not u:
+        u = UserSettings(id=1)
+        db.add(u)
+    for k, v in data.dict(exclude_unset=True).items():
+        setattr(u, k, v)
+    db.commit(); db.refresh(u)
+    return _user_to_dict(u)
+
+
+# ----- Static file serving for the React SPA + uploads --------------------
+# The React build outputs to app/static/. In prod, FastAPI serves that as
+# the site root. In dev the frontend runs on :3737 via Vite and calls this
+# server for /api/*. Uploads always live under /static/uploads/.
+
+_STATIC_DIR = Path(__file__).parent / "static"
+if _STATIC_DIR.exists():
+    app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+    # SPA fallback: any GET path not matched by an @app.get is served by
+    # index.html so React Router handles it. Register only if a built
+    # frontend is present.
+    _SPA_INDEX = _STATIC_DIR / "index.html"
+    if _SPA_INDEX.exists():
+        @app.get("/{full_path:path}", include_in_schema=False)
+        def spa_fallback(full_path: str):
+            # Skip API routes + docs (they have their own handlers)
+            if full_path.startswith(("api/", "ws/", "docs", "openapi.json", "static/")):
+                raise HTTPException(status_code=404)
+            file_path = _STATIC_DIR / full_path
+            if file_path.is_file():
+                return FileResponse(file_path)
+            return FileResponse(_SPA_INDEX)
+
