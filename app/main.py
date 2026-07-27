@@ -2750,6 +2750,65 @@ def update_user_me(data: UserSettingsPatch, key: str = "", db: Session = Depends
     return _user_to_dict(u)
 
 
+# ----- Equity Guardian control ---------------------------------------------
+# Task #53. Guardian fires automatically inside executor.py — this endpoint
+# exposes reset + status inspection to the frontend Accounts page.
+
+@app.post("/api/accounts/{account_id}/reset-guardian")
+def reset_guardian(account_id: int, key: str = "", db: Session = Depends(get_db)):
+    """Clear guardian lock — state back to 'active', pnl_today back to 0.
+    Trader calls this manually after acknowledging the day is over."""
+    _admin_check(key)
+    acct = db.query(Account).filter(Account.id == account_id).first()
+    if not acct:
+        raise HTTPException(status_code=404, detail="account not found")
+    prev_state = acct.state
+    prev_pnl = acct.pnl_today
+    acct.state = "active"
+    acct.pnl_today = 0.0
+    acct.wins_today = 0
+    acct.losses_today = 0
+    db.commit(); db.refresh(acct)
+    return {
+        "reset": True,
+        "account_id": acct.id,
+        "previous_state": prev_state,
+        "previous_pnl_today": prev_pnl,
+        "new_state": acct.state,
+    }
+
+
+@app.get("/api/accounts/{account_id}/guardian-status")
+def guardian_status(account_id: int, db: Session = Depends(get_db)):
+    """Returns whether guardian is currently blocking + how close we are
+    to breach. Powers the "you're at X% of daily limit" progress on the
+    Accounts page (#52 prop firm progress bars)."""
+    acct = db.query(Account).filter(Account.id == account_id).first()
+    if not acct:
+        raise HTTPException(status_code=404, detail="account not found")
+    limit = float(acct.daily_loss_limit or 0)
+    pnl_today = float(acct.pnl_today or 0)
+    if limit <= 0:
+        return {
+            "account_id": acct.id, "state": acct.state, "limit_configured": False,
+            "daily_limit": 0, "pnl_today": pnl_today, "pct_used": 0,
+            "locked": (acct.state == "stopped"),
+        }
+    # pct_used: 0 = fresh day, 100 = fully breached
+    pct = 0.0
+    if pnl_today < 0:
+        pct = min(100.0, (abs(pnl_today) / limit) * 100.0)
+    return {
+        "account_id": acct.id,
+        "state": acct.state,
+        "limit_configured": True,
+        "daily_limit": limit,
+        "pnl_today": pnl_today,
+        "pct_used": round(pct, 1),
+        "locked": (acct.state == "stopped") or (pnl_today <= -limit),
+    }
+
+
 # ----- Static file serving for the React SPA + uploads --------------------
 # The React build outputs to app/static/. In prod, FastAPI serves that as
 # the site root. In dev the frontend runs on :3737 via Vite and calls this

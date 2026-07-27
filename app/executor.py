@@ -29,6 +29,8 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from datetime import timezone as _dt_timezone
+
 from .brokers import get_broker
 from .brokers.base import BrokerResult
 from .models import Position, StopUpdate
@@ -36,6 +38,81 @@ from .models import Position, StopUpdate
 
 def _now_iso() -> str:
     return datetime.utcnow().isoformat()
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 / task #53: Equity Guardian
+# ---------------------------------------------------------------------------
+# Server-side hard drawdown enforcement. Runs BEFORE every ENTRY and
+# AFTER every position CLOSE.
+#
+# Behavior:
+#   - If account.daily_loss_limit > 0 AND account.pnl_today <= -limit:
+#       * Reject new entries with reason "guardian_locked:daily"
+#       * Emergency-flat all currently-open positions on that account
+#       * Transition account.state → "stopped"
+#   - Reset via /api/accounts/{id}/reset-guardian (manual — trader
+#     acknowledges the day is over)
+#
+# Prevents blowing prop firm accounts on a bad day even if Pine keeps
+# firing signals. Complements #123 unified risk gate.
+
+def guardian_check(account, db: Session | None = None) -> tuple[bool, str]:
+    """Return (allowed, reason). Called before every ENTRY."""
+    if account is None:
+        return True, ""
+    # Account is already stopped → block
+    if (account.state or "active") == "stopped":
+        return False, "guardian_locked:already_stopped"
+    limit = float(account.daily_loss_limit or 0)
+    if limit <= 0:
+        return True, ""  # No limit configured for this account
+    pnl_today = float(account.pnl_today or 0)
+    # Breach: we've lost as much (or more) than the daily limit
+    if pnl_today <= -limit:
+        return False, f"guardian_locked:daily:pnl={pnl_today}:limit={limit}"
+    return True, ""
+
+
+def _flatten_account_positions(account, db: Session) -> int:
+    """Emergency: close every OPEN/PARTIAL/PENDING position on this account.
+    Returns count of positions flattened. Runs when guardian triggers."""
+    if account is None or db is None:
+        return 0
+    opens = db.query(Position).filter(
+        Position.account_id == account.id,
+        Position.status.in_(["OPEN", "PARTIAL", "PENDING"]),
+    ).all()
+    now_dt = datetime.now(_dt_timezone.utc)
+    for p in opens:
+        p.status = "CLOSED"
+        p.qty_open = 0
+        p.exit_reason = "guardian_flat"
+        if not p.exit_time:
+            p.exit_time = now_dt
+        # NOTE: does NOT send FLAT to broker adapter here — that runs via
+        # the normal FLAT event path when the trader gets the guardian
+        # notification and confirms. Guardian just records the intent
+        # + blocks further entries.
+    return len(opens)
+
+
+def trigger_guardian(account, db: Session, reason: str) -> dict:
+    """Called when guardian_check fails. Flattens + stops the account.
+    Returns a dict describing what happened, suitable for a broker-error
+    string or a webhook rejection payload."""
+    if account is None or db is None:
+        return {"triggered": False, "reason": reason}
+    flattened = _flatten_account_positions(account, db)
+    account.state = "stopped"
+    return {
+        "triggered": True,
+        "account_id": account.id,
+        "account_name": account.name,
+        "reason": reason,
+        "positions_flattened": flattened,
+        "at": _now_iso(),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -106,6 +183,14 @@ def _apply_rotation_on_close(position, db: Session) -> dict:
     acct.pnl_cycle = (acct.pnl_cycle or 0.0) + trade_pnl
     acct.pnl_today = (acct.pnl_today or 0.0) + trade_pnl
 
+    # Guardian post-close check: this trade may have crossed the daily
+    # limit. If so, flatten + stop the account immediately (no waiting
+    # for the next entry attempt to trigger the check).
+    guardian_result = None
+    ok, gr_reason = guardian_check(acct, db)
+    if not ok and (acct.state or "active") != "stopped":
+        guardian_result = trigger_guardian(acct, db, gr_reason)
+
     result = {
         "verdict": verdict,
         "wins_cycle": acct.wins_cycle,
@@ -113,6 +198,8 @@ def _apply_rotation_on_close(position, db: Session) -> dict:
         "pnl_cycle": round(acct.pnl_cycle, 2),
         "trade_pnl": round(trade_pnl, 2),
     }
+    if guardian_result:
+        result["guardian"] = guardian_result
 
     if not position.group_name:
         return {**result, "rotation_check": "no_group"}
@@ -326,6 +413,16 @@ def execute_trade(signal, db: Session | None = None, *,
 
     # ---- ENTRY -----------------------------------------------------------
     if event == "ENTRY":
+        # Guardian check: block entry if this account has already breached
+        # its daily loss limit. Runs regardless of observe_only so even
+        # simulated fan-out respects the guardian (accurate observability).
+        if account is not None:
+            ok, reason = guardian_check(account, db)
+            if not ok:
+                trigger_guardian(account, db, reason)
+                db.commit()
+                return _reject(reason, signal)
+
         if position is None:
             position = Position(
                 trade_id=trade_id,
