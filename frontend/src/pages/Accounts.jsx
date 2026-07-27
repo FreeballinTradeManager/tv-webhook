@@ -176,14 +176,21 @@ export default function AccountsPage() {
                 <CardHeader>
                   <div className="flex justify-between items-start">
                     <CardTitle className="text-white">{acc.name}</CardTitle>
-                    <Badge variant="outline" className="capitalize bg-blue-500/10 text-blue-400 border-blue-500/30">{acc.account_type.replace('_', ' ')}</Badge>
+                    <Badge variant="outline" className="capitalize bg-blue-500/10 text-blue-400 border-blue-500/30">{(acc.account_type || acc.env || 'live').replace('_', ' ')}</Badge>
                   </div>
-                  <p className="text-sm text-slate-400">{acc.broker_name}</p>
+                  <p className="text-sm text-slate-400">{acc.broker_name || acc.broker || '—'}</p>
                 </CardHeader>
                 <CardContent className="space-y-2">
-                  <div className="flex justify-between text-slate-300"><span>Current Balance</span> <span className="font-bold text-white">${acc.current_balance?.toLocaleString()}</span></div>
-                  <div className="flex justify-between text-slate-300"><span>Starting Balance</span> <span className="font-mono">${acc.starting_balance?.toLocaleString()}</span></div>
-                   <div className="flex justify-between text-slate-300"><span>P&L</span> <span className={(acc.current_balance - acc.starting_balance) >= 0 ? 'text-green-500' : 'text-red-500'}>${(acc.current_balance - acc.starting_balance).toLocaleString()}</span></div>
+                  <div className="flex justify-between text-slate-300"><span>Current Balance</span> <span className="font-bold text-white">${(acc.current_balance ?? 0).toLocaleString()}</span></div>
+                  <div className="flex justify-between text-slate-300"><span>Starting Balance</span> <span className="font-mono">${(acc.starting_balance ?? 0).toLocaleString()}</span></div>
+                   <div className="flex justify-between text-slate-300"><span>P&L</span> <span className={((acc.current_balance ?? 0) - (acc.starting_balance ?? 0)) >= 0 ? 'text-green-500' : 'text-red-500'}>${((acc.current_balance ?? 0) - (acc.starting_balance ?? 0)).toLocaleString()}</span></div>
+                  <div className="flex justify-between text-slate-300"><span>State</span> <Badge variant="outline" className={
+                    (acc.state === 'active' ? 'bg-green-500/10 text-green-400 border-green-500/30' :
+                     acc.state === 'benched' ? 'bg-yellow-500/10 text-yellow-400 border-yellow-500/30' :
+                     acc.state === 'cooled' ? 'bg-blue-500/10 text-blue-400 border-blue-500/30' :
+                     acc.state === 'stopped' ? 'bg-red-500/10 text-red-400 border-red-500/30' :
+                     'bg-slate-500/10 text-slate-400 border-slate-500/30')
+                  }>{acc.state || 'active'}</Badge></div>
                 </CardContent>
                 <div className="p-4 flex justify-end gap-2 border-t border-slate-800">
                   <Button variant="ghost" size="icon" onClick={() => handleDelete(acc.id)}>
