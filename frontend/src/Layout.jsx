@@ -12,7 +12,8 @@ import {
   PlusCircle,
   BarChart3,
   Rewind,
-  KeyRound
+  KeyRound,
+  Activity
 } from "lucide-react";
 import {
   Sidebar,
@@ -31,6 +32,7 @@ import {
 
 const navigationItems = [
   { title: "Dashboard", url: createPageUrl("Dashboard"), icon: LayoutDashboard },
+  { title: "Live Positions", url: createPageUrl("LivePositions"), icon: Activity },
   { title: "Trades", url: createPageUrl("Trades"), icon: TrendingUp },
   { title: "New Trade", url: createPageUrl("NewTrade"), icon: PlusCircle },
   { title: "Risk Calculator", url: createPageUrl("RiskCalculator"), icon: Calculator },
