@@ -469,6 +469,14 @@ class UserSettings(Base):
     alert_configuration = Column(JSON, nullable=True)
     # Trader response popup config — win_popup: gold/grey, loss_popup: motivational/ai_advice
     trader_response = Column(JSON, nullable=True)
+    # Task #43: Global Kill Switch. When on, executor rejects ALL entries
+    # across every account/group/strategy. Trader flips this in an
+    # emergency ("something's wrong — stop trading immediately").
+    # Reset requires explicit action (POST /api/kill-switch { on: false }).
+    kill_switch_on = Column(Boolean, nullable=False, default=False)
+    kill_switch_triggered_at = Column(DateTime(timezone=True), nullable=True)
+    kill_switch_reason = Column(String, nullable=True)
+
     # UI customization
     desktop_header_text = Column(String, nullable=True, default="TradeCore")
     # Trader's first name — used in personalized dashboard greeting.

@@ -155,6 +155,11 @@ MIGRATIONS = [
     "ALTER TABLE groups ADD COLUMN IF NOT EXISTS time_windows JSON",
     "ALTER TABLE groups ADD COLUMN IF NOT EXISTS schedule_label TEXT",
 
+    # Task #43: Global Kill Switch — on the user_settings singleton
+    "ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS kill_switch_on BOOLEAN NOT NULL DEFAULT FALSE",
+    "ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS kill_switch_triggered_at TIMESTAMPTZ",
+    "ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS kill_switch_reason TEXT",
+
     # Phase 2.1b: extend positions with Base44 Trade shape fields so we can
     # serve /api/trades from the same table. Nullable — legacy positions
     # keep working.

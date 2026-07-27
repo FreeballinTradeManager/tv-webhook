@@ -20,6 +20,7 @@ import StatsCard from "../components/dashboard/StatsCard";
 import RecentTrades from "../components/dashboard/RecentTrades";
 import SessionPerformance from "../components/dashboard/SessionPerformance";
 import AccountOverview from "../components/dashboard/AccountOverview";
+import KillSwitchButton from "../components/KillSwitchButton";
 
 // Rules checklist stores today's checked state in localStorage keyed by
 // date, so ticks reset naturally at midnight (new day, new key, empty set).
@@ -123,12 +124,15 @@ export default function Dashboard() {
               {new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })} — Here's your trading overview
             </p>
           </div>
-          <Link to={createPageUrl("NewTrade")}>
-            <Button className="bg-blue-600 hover:bg-blue-700 text-white shadow-lg shadow-blue-500/30">
-              <Plus className="w-5 h-5 mr-2" />
-              New Trade
-            </Button>
-          </Link>
+          <div className="flex items-center gap-2">
+            <KillSwitchButton />
+            <Link to={createPageUrl("NewTrade")}>
+              <Button className="bg-blue-600 hover:bg-blue-700 text-white shadow-lg shadow-blue-500/30">
+                <Plus className="w-5 h-5 mr-2" />
+                New Trade
+              </Button>
+            </Link>
+          </div>
         </div>
 
         {/* Rules checklist — daily commitment. Ticks reset at midnight

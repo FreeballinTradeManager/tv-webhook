@@ -45,3 +45,10 @@ export const User = {
   me: () => api('/api/user/me'),
   updateMyUserData: (payload) => api('/api/user/me', { method: 'PATCH', body: payload }),
 }
+
+// Global Kill Switch — task #43
+export const KillSwitch = {
+  status: () => api('/api/kill-switch'),
+  set: (on, reason = 'manual', flatten_all = false) =>
+    api('/api/kill-switch', { method: 'POST', body: { on, reason, flatten_all } }),
+}

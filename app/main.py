@@ -3025,6 +3025,64 @@ def update_user_me(data: UserSettingsPatch, key: str = "", db: Session = Depends
     return _user_to_dict(u)
 
 
+# ----- Global Kill Switch (task #43) ---------------------------------------
+# BIG RED BUTTON: instantly stops all entries + optionally flattens every
+# open position across every account. Reset is a deliberate two-step action.
+
+class KillSwitchIn(BaseModel):
+    on: bool
+    reason: Optional[str] = "manual"
+    flatten_all: Optional[bool] = False   # also flat every open position?
+
+
+@app.get("/api/kill-switch")
+def kill_switch_status(db: Session = Depends(get_db)):
+    us = db.query(UserSettings).filter(UserSettings.id == 1).first()
+    if not us:
+        return {"on": False, "triggered_at": None, "reason": None}
+    return {
+        "on": bool(getattr(us, "kill_switch_on", False)),
+        "triggered_at": getattr(us, "kill_switch_triggered_at", None).isoformat()
+                        if getattr(us, "kill_switch_triggered_at", None) else None,
+        "reason": getattr(us, "kill_switch_reason", None),
+    }
+
+
+@app.post("/api/kill-switch")
+def kill_switch_set(data: KillSwitchIn, key: str = "", db: Session = Depends(get_db)):
+    _admin_check(key)
+    us = db.query(UserSettings).filter(UserSettings.id == 1).first()
+    if not us:
+        us = UserSettings(id=1)
+        db.add(us)
+    us.kill_switch_on = bool(data.on)
+    if data.on:
+        us.kill_switch_triggered_at = datetime.now(timezone.utc)
+        us.kill_switch_reason = data.reason or "manual"
+    else:
+        us.kill_switch_reason = None
+        # Keep triggered_at as audit trail — user knows when it was last on.
+
+    flattened_summary = {"accounts_touched": 0, "positions_flattened": 0}
+    if data.on and data.flatten_all:
+        # Emergency flat every open position across every account
+        from .executor import _flatten_account_positions
+        accounts = db.query(Account).all()
+        for acct in accounts:
+            n = _flatten_account_positions(acct, db)
+            if n > 0:
+                flattened_summary["accounts_touched"] += 1
+                flattened_summary["positions_flattened"] += n
+    db.commit()
+    db.refresh(us)
+    return {
+        "on": us.kill_switch_on,
+        "triggered_at": us.kill_switch_triggered_at.isoformat() if us.kill_switch_triggered_at else None,
+        "reason": us.kill_switch_reason,
+        "flattened": flattened_summary if data.flatten_all else None,
+    }
+
+
 # ----- Equity Guardian control ---------------------------------------------
 # Task #53. Guardian fires automatically inside executor.py — this endpoint
 # exposes reset + status inspection to the frontend Accounts page.

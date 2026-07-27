@@ -97,6 +97,22 @@ def _flatten_account_positions(account, db: Session) -> int:
     return len(opens)
 
 
+def kill_switch_check(db: Session) -> tuple[bool, str]:
+    """Task #43: global kill switch. Returns (allowed, reason).
+    Reads user_settings.kill_switch_on singleton. When on, ALL entries
+    across every account are rejected."""
+    if db is None:
+        return True, ""
+    from .models import UserSettings
+    us = db.query(UserSettings).filter(UserSettings.id == 1).first()
+    if not us:
+        return True, ""
+    if getattr(us, "kill_switch_on", False):
+        reason = getattr(us, "kill_switch_reason", None) or "manual_kill_switch"
+        return False, f"kill_switch:{reason}"
+    return True, ""
+
+
 def trigger_guardian(account, db: Session, reason: str) -> dict:
     """Called when guardian_check fails. Flattens + stops the account.
     Returns a dict describing what happened, suitable for a broker-error
@@ -413,6 +429,11 @@ def execute_trade(signal, db: Session | None = None, *,
 
     # ---- ENTRY -----------------------------------------------------------
     if event == "ENTRY":
+        # Task #43: Global kill switch check FIRST — no account is exempt.
+        ok, kill_reason = kill_switch_check(db)
+        if not ok:
+            return _reject(kill_reason, signal)
+
         # Guardian check: block entry if this account has already breached
         # its daily loss limit. Runs regardless of observe_only so even
         # simulated fan-out respects the guardian (accurate observability).
