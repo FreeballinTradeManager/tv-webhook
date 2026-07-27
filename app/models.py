@@ -94,6 +94,24 @@ class Position(Base):
     # NULL when the signal wasn't routed through a group.
     group_name = Column(String, nullable=True, index=True)
 
+    # Phase 2.1b: Base44 Trade shape fields. Migration adds these columns to
+    # existing DBs; the ORM class exposes them so /api/trades can read/write.
+    # Legacy rows have NULL — endpoint handles that.
+    direction = Column(String, nullable=True)            # "long" / "short" — parallel to `side` (LONG/SHORT)
+    pips = Column(Float, nullable=True)
+    session = Column(String, nullable=True, index=True)  # london / new_york / asian / daily
+    lot_size = Column(Float, nullable=True)
+    risk_percentage = Column(Float, nullable=True)
+    risk_amount = Column(Float, nullable=True)
+    entry_time = Column(DateTime(timezone=True), nullable=True)
+    exit_time = Column(DateTime(timezone=True), nullable=True)
+    strategy_id = Column(Integer, ForeignKey("strategies.id", ondelete="SET NULL"), nullable=True, index=True)
+    trailing_stop_used = Column(Boolean, nullable=False, default=False)
+    trailing_stop_distance = Column(Float, nullable=True)
+    notes = Column(Text, nullable=True)
+    screenshot_url = Column(String, nullable=True)
+    symbol_alias = Column(String, nullable=True)
+
 
 # ---------------------------------------------------------------------------
 # Phase 2.5: stop-update ledger
