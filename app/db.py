@@ -132,6 +132,11 @@ MIGRATIONS = [
     # Phase 2 task #51: Goals table auto-created by Base.metadata.create_all.
     # Nothing to seed — starts empty; user creates their own targets.
 
+    # Personal touch — add name + rules columns to existing user_settings row.
+    "ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS trader_name TEXT",
+    "ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS trading_rules JSON",
+    "ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS welcome_message TEXT",
+
     # Phase 2.1b: extend positions with Base44 Trade shape fields so we can
     # serve /api/trades from the same table. Nullable — legacy positions
     # keep working.

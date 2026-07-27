@@ -390,6 +390,20 @@ class UserSettings(Base):
     trader_response = Column(JSON, nullable=True)
     # UI customization
     desktop_header_text = Column(String, nullable=True, default="TradeCore")
+    # Trader's first name — used in personalized dashboard greeting.
+    # "Let's bank some coin, {trader_name}! Stick to your rules."
+    trader_name = Column(String, nullable=True)
+    # Personal trading rules — JSON array of strings. Displayed as a
+    # daily-reset checklist on the Dashboard so the trader commits to
+    # their playbook before opening the first position.
+    #   e.g. ["No revenge trades", "Max 3 trades/day", "Stop by 2pm ET",
+    #         "Only trade with the trend", "Journal every trade"]
+    trading_rules = Column(JSON, nullable=True)
+    # Trader-configurable welcome message. Default: "Let's bank some
+    # coin {name}!! Stick to your rules". {name} placeholder replaced
+    # with trader_name at render time.
+    welcome_message = Column(String, nullable=True,
+                             default="Let's bank some coin {name}!! Stick to your rules")
 
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(

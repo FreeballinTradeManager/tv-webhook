@@ -30,9 +30,19 @@ export default function SettingsPage() {
       alert_configuration: user.alert_configuration || {},
       trader_response: user.trader_response || {},
       desktop_header_text: user.desktop_header_text || "TradeCore",
+      trader_name: user.trader_name || "",
+      trading_rules: user.trading_rules || [],
+      welcome_message_template: user.welcome_message_template || "Let's bank some coin {name}!! Stick to your rules",
     });
     setLoading(false);
   };
+
+  // Rules editor helpers — string of \n-separated rules ↔ array
+  const rulesText = (settings?.trading_rules || []).join('\n');
+  const setRulesText = (text) => setSettings(prev => ({
+    ...prev,
+    trading_rules: text.split('\n').map(s => s.trim()).filter(Boolean),
+  }));
 
   const handleUpdate = (category, key, value) => {
     setSettings(prev => ({
@@ -60,6 +70,49 @@ export default function SettingsPage() {
           <h1 className="text-3xl font-bold text-white">Settings</h1>
           <p className="text-slate-400">Customize your trading environment.</p>
         </div>
+
+        <Card className="bg-slate-900 border-slate-800">
+          <CardHeader><CardTitle className="text-white">Your Profile</CardTitle></CardHeader>
+          <CardContent className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="trader_name" className="text-slate-300">Your Name</Label>
+              <Input
+                id="trader_name"
+                value={settings.trader_name || ""}
+                onChange={(e) => setSettings({...settings, trader_name: e.target.value})}
+                placeholder="e.g. Natalia"
+                className="bg-slate-800 border-slate-700 text-white"
+              />
+              <p className="text-xs text-slate-500">Used in your Dashboard greeting.</p>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="welcome_msg" className="text-slate-300">Welcome Message</Label>
+              <Input
+                id="welcome_msg"
+                value={settings.welcome_message_template || ""}
+                onChange={(e) => setSettings({...settings, welcome_message_template: e.target.value})}
+                placeholder="Let's bank some coin {name}!! Stick to your rules"
+                className="bg-slate-800 border-slate-700 text-white"
+              />
+              <p className="text-xs text-slate-500">Use <code>{'{name}'}</code> where your name should appear.</p>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="trading_rules" className="text-slate-300">Your Trading Rules</Label>
+              <textarea
+                id="trading_rules"
+                value={rulesText}
+                onChange={(e) => setRulesText(e.target.value)}
+                placeholder={"No revenge trades\nMax 3 trades per day\nStop trading by 2pm ET\nOnly trade with the trend\nJournal every trade"}
+                rows={8}
+                className="w-full bg-slate-800 border border-slate-700 rounded-md p-3 text-white text-sm font-mono"
+              />
+              <p className="text-xs text-slate-500">
+                One rule per line. Shown on the Dashboard as a daily checklist —
+                tick each one before you take your first trade of the day.
+              </p>
+            </div>
+          </CardContent>
+        </Card>
 
         <Card className="bg-slate-900 border-slate-800">
           <CardHeader><CardTitle className="text-white">Notification Settings</CardTitle></CardHeader>

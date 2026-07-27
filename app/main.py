@@ -2713,15 +2713,28 @@ class UserSettingsPatch(BaseModel):
     alert_configuration: Optional[dict] = None
     trader_response: Optional[dict] = None
     desktop_header_text: Optional[str] = None
+    trader_name: Optional[str] = None
+    trading_rules: Optional[list] = None
+    welcome_message: Optional[str] = None
 
 
 def _user_to_dict(u: UserSettings) -> dict:
+    trader_name = (getattr(u, "trader_name", None) or "Trader")
+    template = (getattr(u, "welcome_message", None) or
+                "Let's bank some coin {name}!! Stick to your rules")
+    # Render {name} placeholder for the frontend so Dashboard doesn't
+    # have to do string interpolation.
+    welcome_rendered = template.replace("{name}", trader_name)
     return {
         "id": u.id,
         "notification_settings": u.notification_settings or {},
         "alert_configuration": u.alert_configuration or {},
         "trader_response": u.trader_response or {},
         "desktop_header_text": u.desktop_header_text or "TradeCore",
+        "trader_name": trader_name,
+        "trading_rules": getattr(u, "trading_rules", None) or [],
+        "welcome_message_template": template,
+        "welcome_message": welcome_rendered,
         "updated_at": u.updated_at.isoformat() if u.updated_at else None,
     }
 
