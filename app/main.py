@@ -18,7 +18,7 @@ from .db import get_db, run_migrations
 from . import models  # noqa: F401
 from .models import (
     WebhookSignal, Position, StopUpdate, Account, Group, GroupMember, BROKER_KINDS,
-    Strategy, TradeAlert, UserSettings,
+    Strategy, TradeAlert, UserSettings, Goal,
 )
 from .executor import execute_trade
 from .ws import manager as ws_manager
@@ -2807,6 +2807,111 @@ def guardian_status(account_id: int, db: Session = Depends(get_db)):
         "pct_used": round(pct, 1),
         "locked": (acct.state == "stopped") or (pnl_today <= -limit),
     }
+
+
+# ----- Goals CRUD + progress ----------------------------------------------
+# Task #51. Traders create daily/weekly/monthly $ targets and track
+# progress toward them on the Dashboard hero.
+
+class GoalIn(BaseModel):
+    name: str
+    period: str = "daily"                 # daily / weekly / monthly / cycle
+    target_amount: float
+    account_id: Optional[int] = None      # None = "across all accounts"
+    strategy_id: Optional[int] = None     # None = "any strategy"
+    is_active: Optional[bool] = True
+
+
+class GoalPatch(BaseModel):
+    name: Optional[str] = None
+    period: Optional[str] = None
+    target_amount: Optional[float] = None
+    account_id: Optional[int] = None
+    strategy_id: Optional[int] = None
+    is_active: Optional[bool] = None
+    is_met: Optional[bool] = None
+
+
+def _goal_progress(g: Goal, db: Session) -> dict:
+    """Compute (achieved, pct) for a goal based on its period + scope."""
+    now = datetime.now(timezone.utc)
+    if g.period == "daily":
+        # Use account.pnl_today if scoped, else sum across accounts
+        if g.account_id:
+            acct = db.query(Account).filter(Account.id == g.account_id).first()
+            achieved = float(acct.pnl_today or 0) if acct else 0.0
+        else:
+            achieved = float(
+                db.query(sa_func.coalesce(sa_func.sum(Account.pnl_today), 0)).scalar() or 0
+            )
+    else:
+        # weekly / monthly / cycle: sum realized_pnl from closed positions
+        # in the period window.
+        if g.period == "weekly":
+            start = now - timedelta(days=7)
+        elif g.period == "monthly":
+            start = now - timedelta(days=30)
+        else:
+            start = datetime.min.replace(tzinfo=timezone.utc)  # cycle = all-time
+        q = db.query(sa_func.coalesce(sa_func.sum(Position.realized_pnl), 0))
+        q = q.filter(Position.status == "CLOSED", Position.created_at >= start)
+        if g.account_id:
+            q = q.filter(Position.account_id == g.account_id)
+        if g.strategy_id:
+            q = q.filter(Position.strategy_id == g.strategy_id)
+        achieved = float(q.scalar() or 0)
+    target = float(g.target_amount or 0)
+    pct = 0.0 if target <= 0 else min(200.0, (achieved / target) * 100.0)
+    return {"achieved": round(achieved, 2), "pct": round(pct, 1)}
+
+
+def _goal_to_dict(g: Goal, db: Session = None) -> dict:
+    d = {
+        "id": g.id, "name": g.name, "period": g.period,
+        "target_amount": g.target_amount, "account_id": g.account_id,
+        "strategy_id": g.strategy_id, "is_active": g.is_active,
+        "is_met": g.is_met,
+        "met_at": g.met_at.isoformat() if g.met_at else None,
+        "created_at": g.created_at.isoformat() if g.created_at else None,
+    }
+    if db is not None:
+        d.update(_goal_progress(g, db))
+    return d
+
+
+@app.get("/api/goals")
+def list_goals(db: Session = Depends(get_db)):
+    return [_goal_to_dict(g, db) for g in db.query(Goal).order_by(Goal.id.desc()).all()]
+
+
+@app.post("/api/goals")
+def create_goal(data: GoalIn, key: str = "", db: Session = Depends(get_db)):
+    _admin_check(key)
+    g = Goal(**data.dict(exclude_unset=True))
+    db.add(g); db.commit(); db.refresh(g)
+    return _goal_to_dict(g, db)
+
+
+@app.patch("/api/goals/{gid}")
+def update_goal(gid: int, data: GoalPatch, key: str = "", db: Session = Depends(get_db)):
+    _admin_check(key)
+    g = db.query(Goal).filter(Goal.id == gid).first()
+    if not g: raise HTTPException(status_code=404, detail="goal not found")
+    for k, v in data.dict(exclude_unset=True).items():
+        setattr(g, k, v)
+    if data.is_met is True and not g.met_at:
+        g.met_at = datetime.now(timezone.utc)
+    db.commit(); db.refresh(g)
+    return _goal_to_dict(g, db)
+
+
+@app.delete("/api/goals/{gid}")
+def delete_goal(gid: int, key: str = "", db: Session = Depends(get_db)):
+    _admin_check(key)
+    g = db.query(Goal).filter(Goal.id == gid).first()
+    if not g: raise HTTPException(status_code=404, detail="goal not found")
+    db.delete(g); db.commit()
+    return {"deleted": True, "id": gid}
 
 
 # ----- Static file serving for the React SPA + uploads --------------------

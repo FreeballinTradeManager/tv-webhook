@@ -338,6 +338,42 @@ class TradeAlert(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
+class Goal(Base):
+    """User-defined profit target. Powers Dashboard hero progress bars.
+    Task #51 — 'Hit $500 today' style goals.
+
+    Scope: daily / weekly / monthly / cycle. account_id NULL = "any account".
+    Progress is computed live in /api/goals from account.pnl_today for daily,
+    or from positions.realized_pnl summed over the period."""
+    __tablename__ = "goals"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)                    # display label
+    period = Column(String, nullable=False, default="daily") # daily / weekly / monthly / cycle
+    target_amount = Column(Float, nullable=False)            # $ target
+    account_id = Column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=True, index=True)
+    strategy_id = Column(Integer, ForeignKey("strategies.id", ondelete="CASCADE"), nullable=True, index=True)
+
+    # Trader can mark a goal met + celebrate; the flag persists until reset
+    # so the win popup doesn't fire twice.
+    is_met = Column(Boolean, nullable=False, default=False)
+    met_at = Column(DateTime(timezone=True), nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True)
+
+    # Notification thresholds — Discord/SMS/etc. fire once per threshold crossing
+    notified_50 = Column(Boolean, nullable=False, default=False)
+    notified_80 = Column(Boolean, nullable=False, default=False)
+    notified_100 = Column(Boolean, nullable=False, default=False)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
 class UserSettings(Base):
     """Singleton row (id=1) holding this user's preferences.
     Base44 Settings page reads/writes this via /api/user/me."""

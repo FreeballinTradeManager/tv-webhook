@@ -129,6 +129,9 @@ MIGRATIONS = [
     ON CONFLICT (id) DO NOTHING
     """,
 
+    # Phase 2 task #51: Goals table auto-created by Base.metadata.create_all.
+    # Nothing to seed — starts empty; user creates their own targets.
+
     # Phase 2.1b: extend positions with Base44 Trade shape fields so we can
     # serve /api/trades from the same table. Nullable — legacy positions
     # keep working.
