@@ -1691,18 +1691,35 @@ class AccountUpdate(BaseModel):
     active: Optional[bool] = None
     paused: Optional[bool] = None
     config: Optional[dict] = None
+    # Phase 1.2: rotation state overrides (manual reset / promote / bench)
+    state: Optional[str] = None                 # active | benched | cooled | stopped
+    wins_cycle: Optional[int] = None            # allow manual reset to 0
+    losses_cycle: Optional[int] = None
+    pnl_cycle: Optional[float] = None
 
 
 class GroupCreate(BaseModel):
     name: str
     description: Optional[str] = None
     active: bool = True
+    # Phase 1.2: rotation rules (all optional, null = disabled)
+    rotate_after_wins: Optional[int] = None
+    rotate_after_losses: Optional[int] = None
+    rotate_after_profit: Optional[float] = None
+    rotate_after_loss_pnl: Optional[float] = None
+    min_active_count: int = 1
 
 
 class GroupUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     active: Optional[bool] = None
+    # Phase 1.2: rotation rules
+    rotate_after_wins: Optional[int] = None
+    rotate_after_losses: Optional[int] = None
+    rotate_after_profit: Optional[float] = None
+    rotate_after_loss_pnl: Optional[float] = None
+    min_active_count: Optional[int] = None
 
 
 class GroupMemberCreate(BaseModel):
@@ -1730,6 +1747,14 @@ def _account_to_dict(a: Account) -> dict:
         "active": a.active,
         "paused": a.paused,
         "config": a.config,
+        # Phase 1.2 rotation fields
+        "state": getattr(a, "state", None),
+        "wins_cycle": getattr(a, "wins_cycle", 0),
+        "losses_cycle": getattr(a, "losses_cycle", 0),
+        "wins_today": getattr(a, "wins_today", 0),
+        "losses_today": getattr(a, "losses_today", 0),
+        "pnl_cycle": getattr(a, "pnl_cycle", 0.0),
+        "pnl_today": getattr(a, "pnl_today", 0.0),
         "created_at": a.created_at,
         "updated_at": a.updated_at,
     }
@@ -1741,6 +1766,12 @@ def _group_to_dict(g: Group, include_members: bool = True) -> dict:
         "name": g.name,
         "description": g.description,
         "active": g.active,
+        # Phase 1.2 rotation rules
+        "rotate_after_wins": getattr(g, "rotate_after_wins", None),
+        "rotate_after_losses": getattr(g, "rotate_after_losses", None),
+        "rotate_after_profit": getattr(g, "rotate_after_profit", None),
+        "rotate_after_loss_pnl": getattr(g, "rotate_after_loss_pnl", None),
+        "min_active_count": getattr(g, "min_active_count", 1),
         "created_at": g.created_at,
         "updated_at": g.updated_at,
     }
