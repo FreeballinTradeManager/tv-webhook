@@ -2914,6 +2914,165 @@ def delete_goal(gid: int, key: str = "", db: Session = Depends(get_db)):
     return {"deleted": True, "id": gid}
 
 
+# ----- Reconciliation / Broker Sync Verification ---------------------------
+# Task #45. User wants to verify: signal in → broker fill → journal record
+# ALL match. The `reconcile_loop` in reconciliation.py runs every 5s when
+# a real broker is armed. These endpoints expose that state to the frontend
+# + let the trader manually trigger a check.
+
+@app.get("/api/reconciliation/status")
+def reconciliation_status(db: Session = Depends(get_db)):
+    """Snapshot of server-vs-broker sync state.
+    - active: is the background loop running?
+    - broker_name: which adapter is armed
+    - server_positions: count of OPEN/PARTIAL/PENDING in our DB
+    - broker_positions: count from broker (or 'unavailable' if simulated)
+    - recent_warnings: last 20 drift events
+    - in_sync: quick bool — no warnings in last minute + counts match
+    """
+    b = get_broker()
+    is_simulated = b.name == "simulated"
+    server_open = db.query(Position).filter(
+        Position.status.in_(["OPEN", "PARTIAL", "PENDING"])
+    ).count()
+
+    result = {
+        "active": (not is_simulated),
+        "broker_name": b.name,
+        "broker_env": b.env,
+        "server_positions_open": server_open,
+        "broker_positions_open": None,
+        "recent_warnings": list(recent_warnings)[:20],
+        "in_sync": None,
+        "note": None,
+    }
+    if is_simulated:
+        result["note"] = (
+            "Simulated broker — sync check inactive. Server records what "
+            "Pine sent; no real orders were placed. Arm a real broker "
+            "(Tradovate/PMT/TS) via env vars to enable live drift detection."
+        )
+        # In simulated mode we know server is authoritative — always "in sync"
+        result["in_sync"] = True
+        return result
+    # Real broker path
+    try:
+        broker_positions = b.fetch_open_positions()
+        result["broker_positions_open"] = len(broker_positions)
+        # Fresh warnings (< 60s old) mean drift right now
+        import time as _t
+        cutoff = _t.time() - 60
+        fresh_warnings = [w for w in recent_warnings if w.get("ts", 0) >= cutoff]
+        result["in_sync"] = (not fresh_warnings and server_open == len(broker_positions))
+        result["fresh_drift_count"] = len(fresh_warnings)
+    except Exception as e:
+        result["error"] = str(e)
+        result["in_sync"] = False
+    return result
+
+
+@app.post("/api/reconciliation/run")
+async def reconciliation_run_now(key: str = "", db: Session = Depends(get_db)):
+    """Trigger an immediate reconciliation sweep — don't wait for the
+    5-second background loop. Returns the same shape as /status."""
+    _admin_check(key)
+    b = get_broker()
+    if b.name == "simulated":
+        return reconciliation_status(db=db)  # nothing to run — return status
+    # Run one iteration of the recon logic inline
+    try:
+        broker_positions = await asyncio.to_thread(b.fetch_open_positions)
+        from .assets import asset_root
+        server_open = db.query(Position).filter(
+            Position.status.in_(["OPEN", "PARTIAL", "PENDING"])
+        ).all()
+        by_root = {}
+        for p in server_open:
+            by_root.setdefault(asset_root(p.ticker) or p.ticker, []).append(p)
+        broker_by_root = {}
+        for bp in broker_positions:
+            sym = bp.get("symbol") or bp.get("contractSymbol") or ""
+            root = asset_root(sym) or sym
+            broker_by_root[root] = bp
+        checked = list(set(by_root.keys()) | set(broker_by_root.keys()))
+        drift = []
+        for root in checked:
+            ps = by_root.get(root, [])
+            bp = broker_by_root.get(root)
+            if ps and not bp:
+                drift.append({"root": root, "kind": "broker_flat_server_open", "server_qty": sum(p.qty_open or 0 for p in ps)})
+            elif bp and not ps:
+                drift.append({"root": root, "kind": "broker_open_server_flat", "broker_net": bp.get("netPos")})
+            else:
+                sq = sum((p.qty_open or 0) if (p.side or "").upper() == "LONG" else -(p.qty_open or 0) for p in ps)
+                bq = int(bp.get("netPos", 0)) if bp else 0
+                if sq != bq:
+                    drift.append({"root": root, "kind": "qty_mismatch", "server_qty": sq, "broker_qty": bq})
+        return {
+            "checked_roots": checked,
+            "drift": drift,
+            "in_sync": len(drift) == 0,
+            "broker_positions_open": len(broker_positions),
+            "server_positions_open": len(server_open),
+        }
+    except Exception as e:
+        return {"error": str(e), "in_sync": False}
+
+
+@app.get("/api/positions/{pid}/broker-sync")
+def position_broker_sync(pid: int, db: Session = Depends(get_db)):
+    """Per-position sync check. Traces one trade end-to-end:
+    - What Pine sent (signal snapshot from position row)
+    - What broker actually has now (via fetch_open_positions)
+    - Verdict: match / drift / broker_flat / broker_only
+    Powers a 'Verify Sync' button on the Trade detail drawer."""
+    p = db.query(Position).filter(Position.id == pid).first()
+    if not p:
+        raise HTTPException(status_code=404, detail="position not found")
+    b = get_broker()
+    from .assets import asset_root
+    root = asset_root(p.ticker) or p.ticker
+
+    server_view = {
+        "trade_id": p.trade_id, "ticker": p.ticker, "root": root,
+        "side": p.side, "qty_total": p.qty_total, "qty_open": p.qty_open,
+        "entry_price": p.entry_price, "stop_price": p.stop_price,
+        "status": p.status, "broker": p.broker,
+        "broker_order_id": p.broker_order_id,
+        "broker_stop_order_id": p.broker_stop_order_id,
+        "avg_fill_price": p.avg_fill_price,
+        "realized_pnl": p.realized_pnl,
+    }
+    if b.name == "simulated":
+        return {
+            "verdict": "simulated_no_broker_state",
+            "note": "Server records only — no live broker to compare against. Arm a real broker to enable sync verification.",
+            "server_view": server_view,
+        }
+    try:
+        broker_positions = b.fetch_open_positions()
+        matching = [bp for bp in broker_positions
+                    if (asset_root(bp.get("symbol", "")) or bp.get("symbol")) == root]
+        if not matching:
+            return {"verdict": "broker_flat", "server_view": server_view,
+                    "broker_view": None,
+                    "explanation": f"Broker has no position on {root}. Server thinks {p.status}."}
+        # Report first matching leg (a single root usually = one position)
+        bp = matching[0]
+        broker_qty = int(bp.get("netPos", 0))
+        server_signed = (p.qty_open or 0) if (p.side or "").upper() == "LONG" else -(p.qty_open or 0)
+        verdict = "match" if server_signed == broker_qty else "qty_mismatch"
+        return {
+            "verdict": verdict,
+            "server_view": server_view,
+            "broker_view": bp,
+            "server_signed_qty": server_signed,
+            "broker_signed_qty": broker_qty,
+        }
+    except Exception as e:
+        return {"verdict": "broker_error", "error": str(e), "server_view": server_view}
+
+
 # ----- Static file serving for the React SPA + uploads --------------------
 # The React build outputs to app/static/. In prod, FastAPI serves that as
 # the site root. In dev the frontend runs on :3737 via Vite and calls this
