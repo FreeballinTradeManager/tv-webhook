@@ -214,6 +214,16 @@ class Account(Base):
         nullable=False,
     )
 
+    # Task #71 + #72 + #151: per-account safety limits + time windows.
+    # 0 = no limit (default). Checked in preflight_gate before entry.
+    max_concurrent_positions = Column(Integer, nullable=False, default=0)
+    max_trades_today = Column(Integer, nullable=False, default=0)
+    # Per-account time windows — Big Risk 18:00-01:00 + 11:45-15:00 style.
+    # JSON list of {start:"HH:MM", end:"HH:MM", tz:"America/New_York"}.
+    # Cross-midnight supported. Complements Group.time_windows — both are
+    # checked; entry blocked if either says "closed now".
+    time_windows = Column(JSON, nullable=True)
+
     group_memberships = relationship(
         "GroupMember",
         back_populates="account",

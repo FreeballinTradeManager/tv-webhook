@@ -160,6 +160,11 @@ MIGRATIONS = [
     "ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS kill_switch_triggered_at TIMESTAMPTZ",
     "ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS kill_switch_reason TEXT",
 
+    # Tasks #71 + #72 + #151: per-account safety limits + time windows
+    "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS max_concurrent_positions INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS max_trades_today INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS time_windows JSON",
+
     # Phase 2.1b: extend positions with Base44 Trade shape fields so we can
     # serve /api/trades from the same table. Nullable — legacy positions
     # keep working.

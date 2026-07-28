@@ -97,6 +97,120 @@ def _flatten_account_positions(account, db: Session) -> int:
     return len(opens)
 
 
+def _parse_hhmm(s: str) -> int:
+    """'HH:MM' → minutes-since-midnight, or -1 on parse fail."""
+    try:
+        h, m = s.split(":")
+        return int(h) * 60 + int(m)
+    except Exception:
+        return -1
+
+
+def is_in_time_windows(windows) -> bool:
+    """Task #69 + #151 + #152. Return True if current time falls within any
+    of the given windows. Handles cross-midnight (18:00-01:00).
+    Each window: {start: 'HH:MM', end: 'HH:MM', tz: 'America/New_York'}.
+    Empty list = always allowed. Malformed windows silently skipped."""
+    if not windows:
+        return True
+    for w in windows:
+        if not isinstance(w, dict):
+            continue
+        tz_name = w.get("tz") or "America/New_York"
+        try:
+            import zoneinfo
+            tz = zoneinfo.ZoneInfo(tz_name)
+        except Exception:
+            tz = _dt_timezone.utc
+        now = datetime.now(tz)
+        cur = now.hour * 60 + now.minute
+        s = _parse_hhmm(w.get("start", ""))
+        e = _parse_hhmm(w.get("end", ""))
+        if s < 0 or e < 0:
+            continue
+        if s <= e:
+            # Normal window (e.g. 09:00-17:00)
+            if s <= cur < e:
+                return True
+        else:
+            # Cross-midnight (e.g. 18:00-01:00 = 18:00-24:00 OR 00:00-01:00)
+            if cur >= s or cur < e:
+                return True
+    return False
+
+
+def preflight_gate(signal, account, group, db: Session | None) -> tuple[bool, str]:
+    """Task #123: unified pre-fire risk gate. Single decision function
+    called before every ENTRY. Consolidates all safety checks so we
+    have ONE place to add/tweak/audit them.
+
+    Returns (allowed, reason). Reasons follow "gate:sub_reason" convention
+    so downstream (fan_out_log, dashboard, notifications) can filter.
+
+    Gate order (fast-fail — cheapest checks first):
+      1. kill_switch — global stop
+      2. account.state — stopped/paused/inactive
+      3. guardian — daily DD breach
+      4. max_concurrent_positions — safety cap
+      5. max_trades_today — overtrading gate
+      6. account.time_windows — trader schedule per account
+      7. group.time_windows — group session schedule
+    """
+    if db is None:
+        return True, ""
+
+    # 1. Global kill switch
+    ok, reason = kill_switch_check(db)
+    if not ok:
+        return False, reason
+
+    if account is not None:
+        # 2. Account state
+        state = getattr(account, "state", None) or "active"
+        if state == "stopped":
+            return False, "gate:account_stopped"
+        if not getattr(account, "active", True):
+            return False, "gate:account_inactive"
+        if getattr(account, "paused", False):
+            return False, "gate:account_paused"
+
+        # 3. Guardian (daily DD)
+        ok, reason = guardian_check(account, db)
+        if not ok:
+            return False, reason  # already "guardian_locked:..."
+
+        # 4. Max concurrent positions
+        max_conc = int(getattr(account, "max_concurrent_positions", 0) or 0)
+        if max_conc > 0:
+            open_count = db.query(Position).filter(
+                Position.account_id == account.id,
+                Position.status.in_(["OPEN", "PARTIAL", "PENDING"]),
+            ).count()
+            if open_count >= max_conc:
+                return False, f"gate:max_concurrent:{open_count}/{max_conc}"
+
+        # 5. Max daily trades (wins_today + losses_today = trades today)
+        max_daily = int(getattr(account, "max_trades_today", 0) or 0)
+        if max_daily > 0:
+            trades_today = int(getattr(account, "wins_today", 0) or 0) + \
+                           int(getattr(account, "losses_today", 0) or 0)
+            if trades_today >= max_daily:
+                return False, f"gate:max_daily_trades:{trades_today}/{max_daily}"
+
+        # 6. Account time windows
+        acct_windows = getattr(account, "time_windows", None)
+        if acct_windows and not is_in_time_windows(acct_windows):
+            return False, "gate:account_time_window_closed"
+
+    # 7. Group time windows
+    if group is not None:
+        grp_windows = getattr(group, "time_windows", None)
+        if grp_windows and not is_in_time_windows(grp_windows):
+            return False, "gate:group_time_window_closed"
+
+    return True, ""
+
+
 def kill_switch_check(db: Session) -> tuple[bool, str]:
     """Task #43: global kill switch. Returns (allowed, reason).
     Reads user_settings.kill_switch_on singleton. When on, ALL entries
@@ -429,20 +543,20 @@ def execute_trade(signal, db: Session | None = None, *,
 
     # ---- ENTRY -----------------------------------------------------------
     if event == "ENTRY":
-        # Task #43: Global kill switch check FIRST — no account is exempt.
-        ok, kill_reason = kill_switch_check(db)
+        # Task #123: unified preflight gate — one function checks kill switch,
+        # account state, guardian, max concurrent, max daily, and both account
+        # + group time windows. Single audit surface.
+        from .models import Group as _Group
+        grp_obj = None
+        if group_name:
+            grp_obj = db.query(_Group).filter(_Group.name == group_name).first()
+        ok, gate_reason = preflight_gate(signal, account, grp_obj, db)
         if not ok:
-            return _reject(kill_reason, signal)
-
-        # Guardian check: block entry if this account has already breached
-        # its daily loss limit. Runs regardless of observe_only so even
-        # simulated fan-out respects the guardian (accurate observability).
-        if account is not None:
-            ok, reason = guardian_check(account, db)
-            if not ok:
-                trigger_guardian(account, db, reason)
-                db.commit()
-                return _reject(reason, signal)
+            # Guardian breach → also flatten + set stopped (existing behavior)
+            if gate_reason.startswith("guardian_locked") and account is not None:
+                trigger_guardian(account, db, gate_reason)
+            db.commit()
+            return _reject(gate_reason, signal)
 
         if position is None:
             position = Position(

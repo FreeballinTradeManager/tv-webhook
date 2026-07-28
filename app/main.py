@@ -2084,6 +2084,10 @@ class AccountCreate(BaseModel):
     active: bool = True
     paused: bool = False
     config: Optional[dict] = None
+    # Tasks #71 + #72 + #151: preflight-gate safety fields
+    max_concurrent_positions: Optional[int] = 0
+    max_trades_today: Optional[int] = 0
+    time_windows: Optional[list] = None
 
 
 class AccountUpdate(BaseModel):
@@ -2100,6 +2104,10 @@ class AccountUpdate(BaseModel):
     wins_cycle: Optional[int] = None            # allow manual reset to 0
     losses_cycle: Optional[int] = None
     pnl_cycle: Optional[float] = None
+    # Tasks #71 + #72 + #151: preflight-gate safety fields
+    max_concurrent_positions: Optional[int] = None
+    max_trades_today: Optional[int] = None
+    time_windows: Optional[list] = None
 
 
 class GroupCreate(BaseModel):
@@ -2169,6 +2177,10 @@ def _account_to_dict(a: Account) -> dict:
         "losses_cycle": getattr(a, "losses_cycle", 0),
         "wins_today": getattr(a, "wins_today", 0),
         "losses_today": getattr(a, "losses_today", 0),
+        # Tasks #71 + #72 + #151: preflight-gate safety fields
+        "max_concurrent_positions": getattr(a, "max_concurrent_positions", 0),
+        "max_trades_today": getattr(a, "max_trades_today", 0),
+        "time_windows": getattr(a, "time_windows", None) or [],
         "pnl_cycle": getattr(a, "pnl_cycle", 0.0),
         "pnl_today": getattr(a, "pnl_today", 0.0),
         "created_at": a.created_at,
