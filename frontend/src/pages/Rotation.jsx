@@ -14,16 +14,38 @@ import {
   Clock, Link2, UserPlus, Save, X, BookOpen, ShieldAlert
 } from "lucide-react";
 
-// Preset time windows for common sessions
+// Preset time windows for common sessions. Each preset has its own
+// accent color so the buttons are legible on our dark theme (default
+// shadcn outline was rendering as a muddy brown).
 const SESSION_PRESETS = [
-  { label: "London", windows: [{start:"03:00",end:"12:00",tz:"America/New_York"}] },
-  { label: "New York", windows: [{start:"08:00",end:"17:00",tz:"America/New_York"}] },
-  { label: "Asian", windows: [{start:"20:00",end:"02:00",tz:"America/New_York"}] },
-  { label: "Big Risk", windows: [
+  {
+    label: "London",
+    windows: [{start:"03:00",end:"12:00",tz:"America/New_York"}],
+    cls: "bg-blue-500/15 border-blue-500/50 text-blue-300 hover:bg-blue-500/25 hover:text-blue-200",
+  },
+  {
+    label: "New York",
+    windows: [{start:"08:00",end:"17:00",tz:"America/New_York"}],
+    cls: "bg-pink-500/15 border-pink-500/50 text-pink-300 hover:bg-pink-500/25 hover:text-pink-200",
+  },
+  {
+    label: "Asian",
+    windows: [{start:"20:00",end:"02:00",tz:"America/New_York"}],
+    cls: "bg-slate-500/15 border-slate-400/40 text-slate-300 hover:bg-slate-500/25 hover:text-slate-200",
+  },
+  {
+    label: "Big Risk",
+    windows: [
       {start:"18:00",end:"01:00",tz:"America/New_York"},
       {start:"11:45",end:"15:00",tz:"America/New_York"},
-    ]},
-  { label: "24/7", windows: [] },  // empty = always tradeable
+    ],
+    cls: "bg-red-500/15 border-red-500/50 text-red-300 hover:bg-red-500/25 hover:text-red-200",
+  },
+  {
+    label: "24/7",
+    windows: [],
+    cls: "bg-green-500/15 border-green-500/50 text-green-300 hover:bg-green-500/25 hover:text-green-200",
+  },
 ];
 
 /** Cascade chain visualization for a group — walks next_group_id links */
@@ -83,12 +105,15 @@ function TimeWindowsEditor({ windows, onChange }) {
         </div>
       ))}
       <div className="flex flex-wrap gap-1 pt-1">
-        <Button size="sm" variant="outline" className="h-6 text-xs" onClick={add}>
+        <Button size="sm" variant="outline"
+                onClick={add}
+                className="h-6 text-xs bg-slate-800 border-slate-600 text-slate-200 hover:bg-slate-700 hover:text-white">
           <Plus className="w-3 h-3 mr-1"/>Custom
         </Button>
         {SESSION_PRESETS.map(p => (
-          <Button key={p.label} size="sm" variant="outline" className="h-6 text-xs text-slate-400"
-                  onClick={() => applyPreset(p)}>
+          <Button key={p.label} size="sm" variant="outline"
+                  onClick={() => applyPreset(p)}
+                  className={`h-6 text-xs ${p.cls}`}>
             {p.label}
           </Button>
         ))}
@@ -159,10 +184,11 @@ function GroupCard({ group, allGroups, allAccounts, allStrategies, onUpdate, onD
                    className="bg-transparent border-0 text-white text-xl font-bold p-0 h-auto focus-visible:ring-0 min-w-0"/>
           </div>
           <div className="flex items-center gap-1 shrink-0">
-            <Button size="sm" variant={edit.active ? "outline" : "ghost"}
+            <Button size="sm" variant="outline"
                     onClick={() => set("active", !edit.active)}
-                    className={edit.active ? "text-green-400 border-green-500/30 h-7"
-                                           : "text-slate-500 h-7"}>
+                    className={edit.active
+                      ? "h-7 bg-green-500/15 border-green-500/50 text-green-300 hover:bg-green-500/25 hover:text-green-200"
+                      : "h-7 bg-slate-800 border-slate-600 text-slate-400 hover:bg-slate-700 hover:text-slate-200"}>
               {edit.active ? "🟢 Active" : "⚪ Paused"}
             </Button>
             <Button size="icon" variant="ghost" onClick={() => onDelete(group.id)} className="h-7 w-7">
@@ -207,7 +233,8 @@ function GroupCard({ group, allGroups, allAccounts, allStrategies, onUpdate, onD
         <div className="border-l-2 border-green-500/40 pl-3">
           <div className="text-xs uppercase text-green-400 font-semibold mb-2 flex items-center justify-between">
             <span className="flex items-center gap-1"><UserPlus className="w-3 h-3"/> Prop Firms — accounts in this group ({memberAccounts.length})</span>
-            <Button size="sm" variant="outline" onClick={() => setAddingMember(!addingMember)} className="h-6 text-xs">
+            <Button size="sm" variant="outline" onClick={() => setAddingMember(!addingMember)}
+                    className="h-6 text-xs bg-slate-800 border-slate-600 text-slate-200 hover:bg-slate-700 hover:text-white">
               {addingMember ? "Cancel" : "+ Add"}
             </Button>
           </div>
@@ -266,9 +293,9 @@ function GroupCard({ group, allGroups, allAccounts, allStrategies, onUpdate, onD
           </div>
         </div>
 
-        {/* Section 4: RULES */}
-        <div className="border-l-2 border-yellow-500/40 pl-3">
-          <div className="text-xs uppercase text-yellow-400 font-semibold mb-2 flex items-center gap-1">
+        {/* Section 4: RULES — using amber (warmer, more legible on our dark slate) */}
+        <div className="border-l-2 border-amber-500/50 pl-3">
+          <div className="text-xs uppercase text-amber-400 font-semibold mb-2 flex items-center gap-1">
             <ShieldAlert className="w-3 h-3"/> Rules — rotate when any trigger hits
             <span className="ml-auto text-slate-500 normal-case font-normal">Currently: {rulesSummary}</span>
           </div>
