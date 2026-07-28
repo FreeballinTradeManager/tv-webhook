@@ -39,10 +39,47 @@ log = logging.getLogger("tv-webhook.main")
 app = FastAPI()
 
 
+# ---------------------------------------------------------------------------
+# Task #39: Midnight reset background job
+# ---------------------------------------------------------------------------
+# Zeros wins_today / losses_today / pnl_today on every account at UTC
+# midnight. Without this the "today" counters accumulate forever which
+# breaks daily-DD guardian checks + goal progress + prop firm compliance.
+
+async def midnight_reset_loop() -> None:
+    """Sleep until next UTC midnight, then reset all accounts' today
+    counters, then repeat. Safe on server restart — worst case is
+    we reset a few minutes late."""
+    while True:
+        try:
+            now = datetime.now(timezone.utc)
+            # Next UTC midnight
+            tomorrow = now.replace(hour=0, minute=0, second=0, microsecond=0) + \
+                       __import__("datetime").timedelta(days=1)
+            wait_s = max(30, (tomorrow - now).total_seconds())
+            await asyncio.sleep(wait_s)
+
+            # Reset all accounts
+            with SessionLocal() as db:
+                accts = db.query(Account).all()
+                for a in accts:
+                    a.wins_today = 0
+                    a.losses_today = 0
+                    a.pnl_today = 0.0
+                db.commit()
+                log.info("midnight_reset: zeroed today counters on %d accounts", len(accts))
+        except Exception as e:
+            log.warning("midnight_reset_loop error: %s — sleeping 5min", e)
+            await asyncio.sleep(300)
+
+
 @app.on_event("startup")
 async def on_startup() -> None:
     # Idempotent: creates tables if missing, adds new columns if missing.
     run_migrations()
+
+    # Task #39: midnight reset always runs, regardless of broker
+    asyncio.create_task(midnight_reset_loop())
 
     # If we have a real broker (Tradovate), kick off the MD WebSocket
     # subscription + the reconciliation loop as background tasks.
@@ -2907,9 +2944,8 @@ def delete_trade(tid: int, key: str = "", db: Session = Depends(get_db)):
 
 @app.get("/api/analytics")
 def analytics(account_id: Optional[int] = None, db: Session = Depends(get_db)):
-    """Win rate, session breakdown, equity curve. Base44 Analytics page can
-    compute this client-side from Trade.list() but this endpoint returns
-    pre-aggregated values for faster load + future caching."""
+    """Win rate, session breakdown, equity curve + task #87 advanced
+    ratios (Sharpe, Sortino, Calmar, Kelly)."""
     q = db.query(Position).filter(Position.status == "CLOSED")
     if account_id:
         q = q.filter(Position.account_id == account_id)
@@ -2920,7 +2956,10 @@ def analytics(account_id: Optional[int] = None, db: Session = Depends(get_db)):
     if not rows:
         return {"total_trades": 0, "win_rate": 0, "net_profit": 0,
                 "profit_factor": 0, "expectancy": 0, "avg_win": 0, "avg_loss": 0,
-                "equity_curve": [], "session_breakdown": {}}
+                "equity_curve": [], "session_breakdown": {},
+                "sharpe": 0, "sortino": 0, "calmar": 0, "kelly_pct": 0,
+                "max_drawdown": 0, "current_streak": 0, "longest_win_streak": 0,
+                "longest_loss_streak": 0}
 
     wins = [p for p in rows if (p.realized_pnl or 0) > 0]
     losses = [p for p in rows if (p.realized_pnl or 0) < 0]
@@ -2936,8 +2975,13 @@ def analytics(account_id: Optional[int] = None, db: Session = Depends(get_db)):
 
     equity = 0
     equity_curve = []
+    peak = 0
+    max_dd = 0
     for i, p in enumerate(rows):
         equity += p.realized_pnl or 0
+        peak = max(peak, equity)
+        dd = peak - equity
+        max_dd = max(max_dd, dd)
         equity_curve.append({"name": f"Trade {i+1}", "equity": round(equity, 2)})
 
     session_breakdown = {}
@@ -2946,6 +2990,52 @@ def analytics(account_id: Optional[int] = None, db: Session = Depends(get_db)):
         session_breakdown.setdefault(s, {"profit": 0, "count": 0})
         session_breakdown[s]["profit"] += p.realized_pnl or 0
         session_breakdown[s]["count"] += 1
+
+    # Task #87: Advanced performance ratios
+    pnls = [p.realized_pnl or 0 for p in rows]
+    n = len(pnls)
+    mean_r = sum(pnls) / n if n else 0
+    # Sharpe = mean / stddev (per trade — no risk-free adjustment)
+    var = sum((r - mean_r) ** 2 for r in pnls) / n if n else 0
+    std = var ** 0.5
+    sharpe = (mean_r / std) if std > 0 else 0
+    # Sortino = mean / downside stddev
+    downside = [r for r in pnls if r < 0]
+    d_var = sum(r ** 2 for r in downside) / n if n else 0
+    d_std = d_var ** 0.5
+    sortino = (mean_r / d_std) if d_std > 0 else 0
+    # Calmar = net_profit / max_drawdown
+    calmar = (net_profit / max_dd) if max_dd > 0 else 0
+    # Kelly criterion — optimal position % of capital
+    # f* = W - (1-W)/R  where W=win_rate as decimal, R=avg_win/avg_loss
+    kelly = 0
+    if avg_loss > 0:
+        w = win_rate / 100
+        r = avg_win / avg_loss
+        kelly = w - (1 - w) / r if r > 0 else 0
+        kelly = max(0, min(1, kelly))  # clamp to [0, 1]
+
+    # Task #78: streak tracking
+    current_streak = 0
+    longest_win_streak = 0
+    longest_loss_streak = 0
+    win_streak = 0
+    loss_streak = 0
+    last_verdict = None
+    for p in rows:
+        pnl = p.realized_pnl or 0
+        v = "W" if pnl > 0 else "L" if pnl < 0 else "N"
+        if v == "W":
+            win_streak += 1; loss_streak = 0
+            longest_win_streak = max(longest_win_streak, win_streak)
+        elif v == "L":
+            loss_streak += 1; win_streak = 0
+            longest_loss_streak = max(longest_loss_streak, loss_streak)
+        last_verdict = v
+    if last_verdict == "W":
+        current_streak = win_streak       # positive number = win streak
+    elif last_verdict == "L":
+        current_streak = -loss_streak     # negative = loss streak
 
     return {
         "total_trades": total,
@@ -2957,7 +3047,71 @@ def analytics(account_id: Optional[int] = None, db: Session = Depends(get_db)):
         "avg_loss": round(avg_loss, 2),
         "equity_curve": equity_curve,
         "session_breakdown": session_breakdown,
+        # Task #87 — advanced ratios
+        "sharpe": round(sharpe, 2),
+        "sortino": round(sortino, 2),
+        "calmar": round(calmar, 2),
+        "kelly_pct": round(kelly * 100, 2),  # as percentage
+        "max_drawdown": round(max_dd, 2),
+        # Task #78 — streaks
+        "current_streak": current_streak,
+        "longest_win_streak": longest_win_streak,
+        "longest_loss_streak": longest_loss_streak,
     }
+
+
+# Task #48: CSV export for tax + tape review
+@app.get("/api/trades.csv")
+def trades_csv(account_id: Optional[int] = None, db: Session = Depends(get_db)):
+    """Download full trade journal as CSV. All fields the tax software /
+    prop firm compliance report / manual review would need."""
+    from fastapi.responses import Response
+    import csv, io
+
+    q = db.query(Position).order_by(Position.created_at.desc())
+    if account_id:
+        q = q.filter(Position.account_id == account_id)
+    rows = q.all()
+
+    accts = {a.id: a for a in db.query(Account).all()}
+
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow([
+        "trade_id", "created_at", "entry_time", "exit_time",
+        "symbol", "direction", "side", "status",
+        "qty_total", "lot_size",
+        "entry_price", "exit_price", "stop_price",
+        "tp1_px", "tp2_px", "tp3_px",
+        "realized_pnl", "pips", "risk_percentage", "risk_amount",
+        "session", "strategy_id", "trailing_stop_used",
+        "account_id", "account_name", "broker", "group_name",
+        "exit_reason", "stop_source", "notes",
+    ])
+    for p in rows:
+        acct = accts.get(p.account_id) if p.account_id else None
+        w.writerow([
+            p.trade_id,
+            p.created_at.isoformat() if p.created_at else "",
+            p.entry_time.isoformat() if p.entry_time else "",
+            p.exit_time.isoformat() if p.exit_time else "",
+            p.ticker, p.direction or "", p.side or "", p.status or "",
+            p.qty_total or 0, p.lot_size or "",
+            p.entry_price or "", p.avg_fill_price or "", p.stop_price or "",
+            p.tp1_px or "", p.tp2_px or "", p.tp3_px or "",
+            p.realized_pnl if p.realized_pnl is not None else "",
+            p.pips or "", p.risk_percentage or "", p.risk_amount or "",
+            p.session or "", p.strategy_id or "", bool(p.trailing_stop_used),
+            p.account_id or "", (acct.name if acct else ""),
+            p.broker or "", p.group_name or "",
+            p.exit_reason or "", p.stop_source or "",
+            (p.notes or "").replace("\n", " ").replace("\r", " "),
+        ])
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename=trades_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.csv"},
+    )
 
 
 # ----- File upload (trade screenshots) -------------------------------------
