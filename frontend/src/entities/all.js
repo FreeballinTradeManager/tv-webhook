@@ -52,3 +52,13 @@ export const KillSwitch = {
   set: (on, reason = 'manual', flatten_all = false) =>
     api('/api/kill-switch', { method: 'POST', body: { on, reason, flatten_all } }),
 }
+
+// Task #107 — Live Position controls (modify SL/TP, close)
+export const PositionControl = {
+  modify: (positionId, changes) =>
+    api(`/api/positions/${positionId}/modify`, { method: 'PATCH', body: changes }),
+  close: (positionId, qty = null, reason = 'manual_close') =>
+    api(`/api/positions/${positionId}/close`, { method: 'POST', body: { qty, reason } }),
+  brokerSync: (positionId) =>
+    api(`/api/positions/${positionId}/broker-sync`),
+}

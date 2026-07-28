@@ -1,12 +1,13 @@
 import React, { useState, useEffect, useMemo } from "react";
-import { Trade, Account } from "@/entities/all";
+import { Trade, Account, PositionControl } from "@/entities/all";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   TrendingUp, TrendingDown, Zap, Clock, CheckCircle2, Circle,
-  Radio, Activity, Target, Shield
+  Radio, Activity, Target, Shield, X, Move, Edit3, Minus, Plus
 } from "lucide-react";
+import { Input } from "@/components/ui/input";
 import TradingViewChart from "@/components/TradingViewChart";
 import { useLiveEvents } from "@/hooks/useLiveEvents";
 
@@ -24,8 +25,60 @@ function formatTimeInTrade(entryTime) {
   return `${hrs}h ${rem}m`;
 }
 
-/** One live position card — the star of the show. Pulses green when a TP hits. */
-function LivePositionCard({ trade, accountName, onSelect, isSelected, tpJustHit }) {
+/** One live position card — the star of the show. Pulses green when a TP hits.
+    Task #107 adds inline SL editing + Close buttons — real-time via WebSocket. */
+function LivePositionCard({ trade, accountName, onSelect, isSelected, tpJustHit, onModified }) {
+  const [editingSL, setEditingSL] = useState(false);
+  const [editSL, setEditSL] = useState(trade.stop_loss || "");
+  const [busy, setBusy] = useState(false);
+
+  const tickSize = trade.symbol?.startsWith("MNQ") || trade.symbol?.startsWith("NQ") ? 0.25 :
+                   trade.symbol?.startsWith("MES") || trade.symbol?.startsWith("ES") ? 0.25 :
+                   trade.symbol?.startsWith("GC") ? 0.1 :
+                   trade.symbol?.startsWith("CL") ? 0.01 :
+                   0.0001;  // forex default
+
+  const nudgeSL = async (ticks) => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const cur = trade.stop_loss ?? trade.entry_price ?? 0;
+      const newSL = +(cur + ticks * tickSize).toFixed(5);
+      await PositionControl.modify(trade.id, { stop_price: newSL, stop_source: `MANUAL_UI:${ticks > 0 ? "+" : ""}${ticks}t` });
+      if (onModified) onModified();
+    } catch (e) { alert(`Move SL failed: ${e.message}`); }
+    setBusy(false);
+  };
+  const moveSLToBE = async () => {
+    if (busy || !trade.entry_price) return;
+    setBusy(true);
+    try {
+      await PositionControl.modify(trade.id, { stop_price: trade.entry_price, stop_source: "MANUAL_UI:BE" });
+      if (onModified) onModified();
+    } catch (e) { alert(`Move to BE failed: ${e.message}`); }
+    setBusy(false);
+  };
+  const saveEditedSL = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await PositionControl.modify(trade.id, { stop_price: +editSL, stop_source: "MANUAL_UI:INPUT" });
+      setEditingSL(false);
+      if (onModified) onModified();
+    } catch (e) { alert(`Save SL failed: ${e.message}`); }
+    setBusy(false);
+  };
+  const closePosition = async (qty = null, reason = "manual_close") => {
+    if (busy) return;
+    if (!window.confirm(qty ? `Close ${qty} contracts of ${trade.symbol}?` : `Close ALL ${trade.symbol}?`)) return;
+    setBusy(true);
+    try {
+      await PositionControl.close(trade.id, qty, reason);
+      if (onModified) onModified();
+    } catch (e) { alert(`Close failed: ${e.message}`); }
+    setBusy(false);
+  };
+
   const isLong = (trade.direction || trade.side || "").toLowerCase() === "long";
   const pnl = trade.profit_loss ?? 0;
   const pnlColor = pnl > 0 ? "text-green-400" : pnl < 0 ? "text-red-400" : "text-slate-400";
@@ -76,12 +129,62 @@ function LivePositionCard({ trade, accountName, onSelect, isSelected, tpJustHit 
           </div>
         </div>
 
-        <div className="flex gap-4 text-xs">
+        <div className="flex gap-3 text-xs items-center">
           <div><span className="text-slate-500">Entry</span> <span className="text-slate-300 ml-1 font-mono">{trade.entry_price?.toFixed(2)}</span></div>
-          <div><span className="text-slate-500">SL</span> <span className="text-slate-300 ml-1 font-mono">{trade.stop_loss?.toFixed(2) || "—"}</span></div>
+          <div className="flex items-center gap-1">
+            <span className="text-slate-500">SL</span>
+            {editingSL ? (
+              <>
+                <Input type="number" step={tickSize} value={editSL}
+                       onChange={e => setEditSL(e.target.value)}
+                       onKeyDown={e => { if (e.key === "Enter") saveEditedSL(); if (e.key === "Escape") setEditingSL(false); }}
+                       onClick={e => e.stopPropagation()}
+                       className="bg-slate-800 border-slate-700 text-white h-6 w-24 px-1.5 text-xs font-mono"/>
+                <Button size="icon" variant="ghost" className="h-6 w-6" disabled={busy}
+                        onClick={e => { e.stopPropagation(); saveEditedSL(); }}>
+                  <CheckCircle2 className="w-3 h-3 text-green-500"/>
+                </Button>
+              </>
+            ) : (
+              <span onClick={e => { e.stopPropagation(); setEditingSL(true); setEditSL(trade.stop_loss || ""); }}
+                    className="text-slate-300 ml-1 font-mono cursor-pointer hover:text-blue-400 hover:underline">
+                {trade.stop_loss?.toFixed(2) || "—"}
+                <Edit3 className="w-3 h-3 inline ml-0.5 opacity-50"/>
+              </span>
+            )}
+          </div>
           <div className="flex items-center gap-1 ml-auto text-slate-400">
             <Clock className="w-3 h-3"/>{formatTimeInTrade(trade.entry_time)}
           </div>
+        </div>
+
+        {/* Task #107: quick-action buttons for TP/SL management */}
+        <div className="flex flex-wrap gap-1 pt-1" onClick={e => e.stopPropagation()}>
+          <Button size="sm" variant="outline" disabled={busy}
+                  onClick={() => nudgeSL(-5)}
+                  className="h-6 text-xs px-2 border-slate-700">
+            <Minus className="w-3 h-3"/>5t SL
+          </Button>
+          <Button size="sm" variant="outline" disabled={busy}
+                  onClick={() => nudgeSL(5)}
+                  className="h-6 text-xs px-2 border-slate-700">
+            <Plus className="w-3 h-3"/>5t SL
+          </Button>
+          <Button size="sm" variant="outline" disabled={busy || !trade.entry_price}
+                  onClick={moveSLToBE}
+                  className="h-6 text-xs px-2 border-blue-500/30 text-blue-400 hover:bg-blue-500/10">
+            <Move className="w-3 h-3 mr-1"/>SL→BE
+          </Button>
+          <Button size="sm" variant="outline" disabled={busy || !trade.qty_open || trade.qty_open < 2}
+                  onClick={() => closePosition(Math.max(1, Math.floor((trade.qty_open || trade.qty_total || 1) / 2)), "manual_half")}
+                  className="h-6 text-xs px-2 border-yellow-500/30 text-yellow-400 hover:bg-yellow-500/10">
+            Close ½
+          </Button>
+          <Button size="sm" variant="outline" disabled={busy}
+                  onClick={() => closePosition(null, "manual_close")}
+                  className="h-6 text-xs px-2 border-red-500/30 text-red-400 hover:bg-red-500/10 ml-auto">
+            <X className="w-3 h-3 mr-1"/>Close All
+          </Button>
         </div>
 
         {tps.length > 0 && (
@@ -265,6 +368,7 @@ export default function LivePositions() {
                   isSelected={selectedSymbol === t.symbol}
                   tpJustHit={!!tpHitFlash[t.trade_id] || !!tpHitFlash[t.id]}
                   onSelect={() => setSelectedSymbol(t.symbol)}
+                  onModified={load}
                 />
               ))
             )}

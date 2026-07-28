@@ -3742,6 +3742,129 @@ async def reconciliation_run_now(key: str = "", db: Session = Depends(get_db)):
         return {"error": str(e), "in_sync": False}
 
 
+# ----- Live Position controls (task #107) ----------------------------------
+# Trader clicks Close / Move SL / Modify TP on a live position card.
+# These hit the position row directly (simulated mode) or the broker
+# adapter (once armed). Broadcast via WebSocket so all tabs sync live.
+
+class PositionModify(BaseModel):
+    stop_price: Optional[float] = None
+    tp1_px: Optional[float] = None
+    tp2_px: Optional[float] = None
+    tp3_px: Optional[float] = None
+    stop_source: Optional[str] = "MANUAL_UI"
+
+
+class PositionClose(BaseModel):
+    qty: Optional[int] = None      # None = close ALL; N = close N contracts
+    reason: Optional[str] = "manual_close"
+
+
+@app.patch("/api/positions/{pid}/modify")
+def modify_position(pid: int, data: PositionModify, key: str = "",
+                    db: Session = Depends(get_db)):
+    """Move SL / TP levels on an open position. Records a StopUpdate row
+    so the ledger tracks the change. Once real broker is armed, this also
+    calls broker.modify_stop() — for now just updates our DB state."""
+    _admin_check(key)
+    p = db.query(Position).filter(Position.id == pid).first()
+    if not p:
+        raise HTTPException(status_code=404, detail="position not found")
+    if (p.status or "").upper() in ("CLOSED", "CANCELLED"):
+        raise HTTPException(status_code=400, detail=f"position is {p.status} — cannot modify")
+
+    changes = {}
+    if data.stop_price is not None:
+        old_sl = p.stop_price
+        p.stop_price = data.stop_price
+        p.stop_source = data.stop_source or "MANUAL_UI"
+        # Record the move for the audit ledger
+        db.add(StopUpdate(
+            trade_id=p.trade_id, ticker=p.ticker, side=p.side,
+            old_stop=old_sl, new_stop=data.stop_price,
+            source=data.stop_source or "MANUAL_UI",
+        ))
+        changes["stop_price"] = {"old": old_sl, "new": data.stop_price}
+    if data.tp1_px is not None:
+        changes["tp1_px"] = {"old": p.tp1_px, "new": data.tp1_px}
+        p.tp1_px = data.tp1_px
+    if data.tp2_px is not None:
+        changes["tp2_px"] = {"old": p.tp2_px, "new": data.tp2_px}
+        p.tp2_px = data.tp2_px
+    if data.tp3_px is not None:
+        changes["tp3_px"] = {"old": p.tp3_px, "new": data.tp3_px}
+        p.tp3_px = data.tp3_px
+
+    db.commit(); db.refresh(p)
+
+    # Broadcast to WebSocket subscribers so live tabs update
+    try:
+        import asyncio as _aio
+        _aio.create_task(ws_manager.broadcast({
+            "type": "position_modified",
+            "trade_id": p.trade_id,
+            "position_id": p.id,
+            "changes": changes,
+        }))
+    except Exception:
+        pass
+
+    return {
+        "position_id": p.id, "trade_id": p.trade_id,
+        "changes": changes,
+        "broker": p.broker,
+        # Once #44 armed: also call broker.modify_stop() here + include broker result
+    }
+
+
+@app.post("/api/positions/{pid}/close")
+def close_position_manual(pid: int, data: PositionClose, key: str = "",
+                          db: Session = Depends(get_db)):
+    """Close a position (full or partial). Marks the row CLOSED (or PARTIAL),
+    fires WebSocket update. Once broker armed → also calls broker.close_position()
+    / close_partial()."""
+    _admin_check(key)
+    p = db.query(Position).filter(Position.id == pid).first()
+    if not p:
+        raise HTTPException(status_code=404, detail="position not found")
+    if (p.status or "").upper() in ("CLOSED", "CANCELLED"):
+        raise HTTPException(status_code=400, detail=f"position already {p.status}")
+
+    close_qty = data.qty if data.qty is not None else p.qty_open
+    close_qty = min(close_qty, p.qty_open or 0)
+    if close_qty <= 0:
+        raise HTTPException(status_code=400, detail="nothing to close")
+
+    p.qty_open = max(0, (p.qty_open or 0) - close_qty)
+    if p.qty_open == 0:
+        p.status = "CLOSED"
+        p.exit_reason = data.reason or "manual_close"
+        p.exit_time = datetime.now(timezone.utc)
+    else:
+        p.status = "PARTIAL"
+
+    db.commit(); db.refresh(p)
+
+    try:
+        import asyncio as _aio
+        _aio.create_task(ws_manager.broadcast({
+            "type": "position_closed" if p.status == "CLOSED" else "position_partial",
+            "trade_id": p.trade_id,
+            "position_id": p.id,
+            "closed_qty": close_qty,
+            "remaining_qty": p.qty_open,
+            "reason": data.reason,
+        }))
+    except Exception:
+        pass
+
+    return {
+        "position_id": p.id, "trade_id": p.trade_id,
+        "closed_qty": close_qty, "remaining_qty": p.qty_open,
+        "status": p.status,
+    }
+
+
 @app.get("/api/positions/{pid}/broker-sync")
 def position_broker_sync(pid: int, db: Session = Depends(get_db)):
     """Per-position sync check. Traces one trade end-to-end:
