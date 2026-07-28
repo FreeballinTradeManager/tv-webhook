@@ -46,6 +46,53 @@ app = FastAPI()
 # midnight. Without this the "today" counters accumulate forever which
 # breaks daily-DD guardian checks + goal progress + prop firm compliance.
 
+async def weekend_flat_loop() -> None:
+    """Task #70: Friday 3:45pm ET auto-flat for prop firm compliance.
+    Runs continuously — sleeps until next Friday 3:45pm ET, then flattens
+    all open positions on accounts with weekend_close_required=true.
+
+    3:45pm ET buffer is intentional: futures/CME session closes at 4:00pm,
+    prop firms often measure 'held over weekend' as anything open at 4:00pm.
+    Flattening 15 min early gives fills time to settle."""
+    import datetime as _dt
+    try:
+        import zoneinfo
+        et = zoneinfo.ZoneInfo("America/New_York")
+    except Exception:
+        et = timezone.utc
+
+    while True:
+        try:
+            now = datetime.now(et)
+            # Find next Friday 3:45pm ET
+            target = now.replace(hour=15, minute=45, second=0, microsecond=0)
+            # weekday(): Mon=0 ... Fri=4, Sat=5, Sun=6
+            days_until_fri = (4 - now.weekday()) % 7
+            if days_until_fri == 0 and now >= target:
+                days_until_fri = 7   # already past this Friday's target
+            target = target + _dt.timedelta(days=days_until_fri)
+            wait_s = max(30, (target - now).total_seconds())
+            log.info("weekend_flat_loop: next trigger at %s (in %.0fs)",
+                     target.isoformat(), wait_s)
+            await asyncio.sleep(wait_s)
+
+            # Flatten every account flagged weekend_close_required
+            from .executor import _flatten_account_positions
+            with SessionLocal() as db:
+                flagged = db.query(Account).filter(
+                    Account.weekend_close_required == True  # noqa
+                ).all()
+                total_flat = 0
+                for a in flagged:
+                    total_flat += _flatten_account_positions(a, db)
+                db.commit()
+                log.info("weekend_flat: flattened %d positions across %d accounts",
+                         total_flat, len(flagged))
+        except Exception as e:
+            log.warning("weekend_flat_loop error: %s — sleeping 10min", e)
+            await asyncio.sleep(600)
+
+
 async def midnight_reset_loop() -> None:
     """Sleep until next UTC midnight, then reset all accounts' today
     counters, then repeat. Safe on server restart — worst case is
@@ -80,6 +127,10 @@ async def on_startup() -> None:
 
     # Task #39: midnight reset always runs, regardless of broker
     asyncio.create_task(midnight_reset_loop())
+    # Task #70: weekend flat cron — runs regardless of broker so we
+    # always mark server-side positions closed; broker-side flatten
+    # happens when a real broker is armed (#44).
+    asyncio.create_task(weekend_flat_loop())
 
     # If we have a real broker (Tradovate), kick off the MD WebSocket
     # subscription + the reconciliation loop as background tasks.
@@ -2125,6 +2176,8 @@ class AccountCreate(BaseModel):
     max_concurrent_positions: Optional[int] = 0
     max_trades_today: Optional[int] = 0
     time_windows: Optional[list] = None
+    # Task #70: weekend auto-flat
+    weekend_close_required: Optional[bool] = False
 
 
 class AccountUpdate(BaseModel):
@@ -2145,6 +2198,8 @@ class AccountUpdate(BaseModel):
     max_concurrent_positions: Optional[int] = None
     max_trades_today: Optional[int] = None
     time_windows: Optional[list] = None
+    # Task #70: weekend auto-flat
+    weekend_close_required: Optional[bool] = None
 
 
 class GroupCreate(BaseModel):
@@ -2218,6 +2273,7 @@ def _account_to_dict(a: Account) -> dict:
         "max_concurrent_positions": getattr(a, "max_concurrent_positions", 0),
         "max_trades_today": getattr(a, "max_trades_today", 0),
         "time_windows": getattr(a, "time_windows", None) or [],
+        "weekend_close_required": getattr(a, "weekend_close_required", False),
         "pnl_cycle": getattr(a, "pnl_cycle", 0.0),
         "pnl_today": getattr(a, "pnl_today", 0.0),
         "created_at": a.created_at,
@@ -3189,6 +3245,41 @@ def update_user_me(data: UserSettingsPatch, key: str = "", db: Session = Depends
         setattr(u, k, v)
     db.commit(); db.refresh(u)
     return _user_to_dict(u)
+
+
+# ----- On-demand Flatten (task #70 companion) ------------------------------
+# Manual "close everything on this account NOW" — doesn't engage kill switch,
+# just does the emergency flat. Useful when trader wants to end the session
+# clean without blocking future trades.
+
+@app.post("/api/accounts/{account_id}/flatten")
+def flatten_account(account_id: int, key: str = "", db: Session = Depends(get_db)):
+    _admin_check(key)
+    acct = db.query(Account).filter(Account.id == account_id).first()
+    if not acct:
+        raise HTTPException(status_code=404, detail="account not found")
+    from .executor import _flatten_account_positions
+    n = _flatten_account_positions(acct, db)
+    db.commit()
+    return {"flattened": n, "account_id": acct.id, "account_name": acct.name}
+
+
+@app.post("/api/flatten-all")
+def flatten_all(key: str = "", db: Session = Depends(get_db)):
+    """Emergency flat every open position across every account.
+    Different from kill switch — doesn't block future entries, just
+    closes the current book. Guardian/kill_switch stay whatever they are."""
+    _admin_check(key)
+    from .executor import _flatten_account_positions
+    total = 0
+    touched = 0
+    for a in db.query(Account).all():
+        n = _flatten_account_positions(a, db)
+        if n > 0:
+            touched += 1
+            total += n
+    db.commit()
+    return {"accounts_touched": touched, "positions_flattened": total}
 
 
 # ----- Global Kill Switch (task #43) ---------------------------------------

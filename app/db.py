@@ -165,6 +165,9 @@ MIGRATIONS = [
     "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS max_trades_today INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS time_windows JSON",
 
+    # Task #70: weekend auto-flat for prop firm compliance
+    "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS weekend_close_required BOOLEAN NOT NULL DEFAULT FALSE",
+
     # Phase 2.1b: extend positions with Base44 Trade shape fields so we can
     # serve /api/trades from the same table. Nullable — legacy positions
     # keep working.

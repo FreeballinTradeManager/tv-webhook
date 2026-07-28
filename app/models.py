@@ -223,6 +223,11 @@ class Account(Base):
     # Cross-midnight supported. Complements Group.time_windows — both are
     # checked; entry blocked if either says "closed now".
     time_windows = Column(JSON, nullable=True)
+    # Task #70: prop-firm weekend compliance. When true, background task
+    # flattens all open positions on this account every Friday 3:45pm ET
+    # (buffer before 4pm session close). Most prop firms fail accounts
+    # that hold over the weekend.
+    weekend_close_required = Column(Boolean, nullable=False, default=False)
 
     group_memberships = relationship(
         "GroupMember",
