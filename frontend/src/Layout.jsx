@@ -14,7 +14,8 @@ import {
   Rewind,
   KeyRound,
   Activity,
-  Repeat
+  Repeat,
+  Sparkles
 } from "lucide-react";
 import {
   Sidebar,
@@ -44,6 +45,7 @@ const navigationItems = [
   { title: "Strategies", url: createPageUrl("Strategies"), icon: BookOpen },
   { title: "Alerts", url: createPageUrl("Alerts"), icon: Bell },
   { title: "Vault", url: createPageUrl("Vault"), icon: KeyRound },
+  { title: "Setup Wizard", url: createPageUrl("Setup"), icon: Sparkles },
   { title: "Settings", url: createPageUrl("Settings"), icon: Settings },
 ];
 

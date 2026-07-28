@@ -15,6 +15,7 @@ import Backtester from './pages/Backtester'
 import Vault from './pages/Vault'
 import LivePositions from './pages/LivePositions'
 import Rotation from './pages/Rotation'
+import Setup from './pages/Setup'
 
 export default function App() {
   return (
@@ -38,6 +39,8 @@ export default function App() {
           <Route path="/Live" element={<LivePositions />} />
           <Route path="/Rotation" element={<Rotation />} />
           <Route path="/Groups" element={<Rotation />} />
+          <Route path="/Setup" element={<Setup />} />
+          <Route path="/Onboarding" element={<Setup />} />
           <Route path="*" element={<PageNotFound />} />
         </Routes>
       </Layout>
