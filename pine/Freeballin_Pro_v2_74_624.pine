@@ -1,0 +1,51 @@
+// ============================================================================
+// Freeballin Pro v2.74 (6.24 base) — CURRENT LIVE automation
+// Source dropped by trader on 2026-08-02. Kept here as the source-of-truth
+// reference for TradeCore's signal parser + strategy seed presets.
+//
+// Alert JSON envelopes emitted by this indicator (verbatim, source-derived):
+//
+//   ENTRY (PickMyTrade) — from f_pmtEntryJson:
+//     {"symbol":"MNQ1!","date":"...","data":"buy","quantity":3,
+//      "risk_percentage":0,"price":24521.25,"gtd_in_second":0,
+//      "stp_limit_stp_price":0,"update_tp":false,"update_sl":false,
+//      "breakeven_offset":0,"token":"...","pyramid":false,
+//      "same_direction_ignore":false,"reverse_order_close":false,
+//      "duplicate_position_allow":false,       ← v2.74 uses FALSE (was true in v2.73)
+//      "order_type":"MKT",
+//      "advance_tp_sl":[{"quantity":1,"tp":24534.50,"sl":24501.00,...},
+//                       {"quantity":1,"tp":24547.75,"sl":24501.00,...},
+//                       {"quantity":1,"tp":99999,   "sl":24501.00,...}],
+//      "multiple_accounts":[{"token":"...","account_id":"...",
+//                            "risk_percentage":0,"quantity_multiplier":1}]}
+//
+//   CLOSE — from f_pmtCloseJson:
+//     {"symbol":"MNQ1!","data":"CLOSE","quantity":0,"full_closed":true,
+//      "token":"...","account_id":"...","multiple_accounts":[...],
+//      "risk_percentage":0.0,"comment":"trail","breakeven":0,
+//      "trail_stop":0,"trail_trigger":0,"trail_freq":0,"trail":0,
+//      "price":0,"tp":0,"stp_limit_stp_price":0,"sl":0,
+//      "main_token_type":"DEMO","duplicate_position_allow":false,
+//      "order_type":null,"dollar_tp":0,"dollar_sl":0,
+//      "reverse_order_close":false,"update_tp":false,"update_sl":false,
+//      "percentage_tp":0,"percentage_sl":0,"same_direction_ignore":false,
+//      "gtd_in_second":0,"date":"...","reverse_action":false,
+//      "created_first":"","strategy_name":"CLOSE (trail)","tif":"GTC",
+//      "breakeven_offset":0}
+//
+//   SL UPDATE (BE / JUMP / CREEP / TRAIL):
+//     {"symbol":"MNQ1!","data":"buy","quantity":2,"update_sl":true,
+//      "update_tp":false,"sl":24515.00,"token":"...",
+//      "same_direction_ignore":false,"duplicate_position_allow":false,
+//      "account_id":"...","multiple_accounts":[...],
+//      "strategy_name":"SL BE (#R2_NEWYORK)"}
+//
+// Note the CURRENT (v2.74) rule differs from the older memory note
+// (`freeballin_pro_v2_73_dup_fix.md`): dup=false EVERYWHERE now, not
+// dup=true on entry. Trust the code — this file is authoritative.
+// ============================================================================
+//
+// Full Pine source below (~1650 lines). Do not edit here — this is a
+// snapshot for reference. Edits go into the TradingView indicator itself
+// and get re-copied here.
+// ============================================================================

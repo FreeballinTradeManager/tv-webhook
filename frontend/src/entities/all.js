@@ -22,6 +22,20 @@ function makeEntity(basePath) {
 }
 
 export const Account = makeEntity('/api/accounts')
+
+// Task #173: bulk clear the trade journal (closed_only by default). Requires admin key.
+export const TradeJournal = {
+  csvUrl: (accountId) => {
+    const p = accountId ? `?account_id=${accountId}` : ''
+    return `/api/trades.csv${p}`
+  },
+  clear: ({ scope = 'closed_only', account_id = null, before_date = null } = {}) => {
+    const params = new URLSearchParams({ scope })
+    if (account_id) params.set('account_id', String(account_id))
+    if (before_date) params.set('before_date', before_date)
+    return api(`/api/trades?${params.toString()}`, { method: 'DELETE' })
+  },
+}
 export const Group = {
   ...makeEntity('/api/groups'),
   addMember: (groupId, payload) => api(`/api/groups/${groupId}/members`, { method: 'POST', body: payload }),

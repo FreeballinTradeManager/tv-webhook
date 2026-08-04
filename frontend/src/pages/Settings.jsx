@@ -6,21 +6,76 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
-import { Save, Info } from "lucide-react";
+import { Save, Info, User as UserIcon, Palette } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import NotifyDeliveryCard from "@/components/NotifyDeliveryCard";
+
+// Task #142 + #181 — persisted trader profile + theme.
+// localStorage-backed so it's portable and works even before backend
+// user_settings shape catches up.
+const PROFILE_KEY = "tradecore_trader_profile_v1";
+const THEME_KEY   = "tradecore_theme_v1";
+
+const TF_OPTIONS = ["1m", "3m", "5m", "15m", "30m", "1h", "4h", "D"];
+const ASSET_OPTIONS = ["MNQ", "NQ", "MES", "ES", "MYM", "YM", "M2K", "RTY", "MGC", "GC", "MNG", "NG", "CL", "EURUSD", "6E", "GBPUSD"];
+const RISK_STYLES = [
+  { key: "flat",    label: "Flat $ risk", hint: "Same $ per trade regardless of streak" },
+  { key: "half",    label: "Half-after-losses", hint: "Cut $ risk in half after N consecutive losses" },
+  { key: "percent", label: "% of balance", hint: "Fixed % of current account balance" },
+];
+
+const THEME_ACCENTS = [
+  { key: "blue",    label: "Signal Blue", css: "217 91% 60%" },
+  { key: "teal",    label: "Tape Teal",   css: "173 80% 40%" },
+  { key: "violet",  label: "Trader Violet", css: "270 60% 55%" },
+  { key: "emerald", label: "Prop Green",  css: "160 84% 40%" },
+];
+const THEME_FONTS = [
+  { key: "system", label: "System Sans (default)", css: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" },
+  { key: "inter",  label: "Inter",                  css: "'Inter', -apple-system, sans-serif" },
+  { key: "mono",   label: "Monospace",              css: "'SF Mono', ui-monospace, Menlo, Consolas, monospace" },
+  { key: "serif",  label: "Serif",                  css: "Georgia, 'Iowan Old Style', serif" },
+];
+
+function loadProfile() {
+  try { return JSON.parse(localStorage.getItem(PROFILE_KEY) || "{}"); } catch { return {}; }
+}
+function loadTheme() {
+  try { return JSON.parse(localStorage.getItem(THEME_KEY) || "{}"); } catch { return {}; }
+}
+function applyTheme(theme) {
+  const accent = THEME_ACCENTS.find(a => a.key === theme.accent) || THEME_ACCENTS[0];
+  const font   = THEME_FONTS.find(f => f.key === theme.font)     || THEME_FONTS[0];
+  const root = document.documentElement;
+  root.style.setProperty("--primary", accent.css);
+  root.style.setProperty("--tradecore-font", font.css);
+  document.body.style.fontFamily = font.css;
+}
 
 export default function SettingsPage() {
   const [settings, setSettings] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [webhookUrl, setWebhookUrl] = useState("");
+  const [profile, setProfile] = useState(loadProfile);
+  const [theme, setTheme] = useState(loadTheme);
 
   useEffect(() => {
     loadSettings();
     const url = `${window.location.origin}/api/log_trade`;
     setWebhookUrl(url);
   }, []);
+
+  useEffect(() => { localStorage.setItem(PROFILE_KEY, JSON.stringify(profile)); }, [profile]);
+  useEffect(() => {
+    localStorage.setItem(THEME_KEY, JSON.stringify(theme));
+    applyTheme(theme);
+  }, [theme]);
+
+  const toggleInList = (list, val) => (list || []).includes(val)
+    ? (list || []).filter(x => x !== val)
+    : [...(list || []), val];
 
   const loadSettings = async () => {
     setLoading(true);
@@ -114,14 +169,181 @@ export default function SettingsPage() {
           </CardContent>
         </Card>
 
+        {/* Task #142 — Trader profile: default preferred TFs / assets / strategies. */}
+        <Card className="bg-slate-900 border-slate-800">
+          <CardHeader>
+            <CardTitle className="text-white flex items-center gap-2">
+              <UserIcon className="w-5 h-5 text-blue-400"/> Trader Profile
+            </CardTitle>
+            <p className="text-xs text-slate-400 mt-1">
+              These defaults auto-fill new trade entries, filter analytics, and hint the AI Coach on what you actually trade.
+            </p>
+          </CardHeader>
+          <CardContent className="space-y-5">
+            <div className="space-y-2">
+              <Label className="text-slate-300 text-sm">Preferred timeframes</Label>
+              <div className="flex flex-wrap gap-2">
+                {TF_OPTIONS.map(tf => {
+                  const on = (profile.timeframes || []).includes(tf);
+                  return (
+                    <button key={tf} type="button"
+                            onClick={() => setProfile(p => ({ ...p, timeframes: toggleInList(p.timeframes, tf) }))}
+                            className={`px-3 h-8 rounded-md text-xs font-semibold border transition-colors ${
+                              on
+                                ? "bg-blue-600 border-blue-500 text-white"
+                                : "bg-slate-950 border-slate-700 text-slate-400 hover:text-white"
+                            }`}>
+                      {tf}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <Label className="text-slate-300 text-sm">Preferred assets</Label>
+              <div className="flex flex-wrap gap-2">
+                {ASSET_OPTIONS.map(a => {
+                  const on = (profile.assets || []).includes(a);
+                  return (
+                    <button key={a} type="button"
+                            onClick={() => setProfile(p => ({ ...p, assets: toggleInList(p.assets, a) }))}
+                            className={`px-3 h-8 rounded-md text-xs font-semibold font-mono border transition-colors ${
+                              on
+                                ? "bg-blue-600 border-blue-500 text-white"
+                                : "bg-slate-950 border-slate-700 text-slate-400 hover:text-white"
+                            }`}>
+                      {a}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <Label className="text-slate-300 text-sm">Risk sizing style</Label>
+              <div className="grid grid-cols-1 gap-2">
+                {RISK_STYLES.map(rs => {
+                  const on = (profile.risk_style || "flat") === rs.key;
+                  return (
+                    <button key={rs.key} type="button"
+                            onClick={() => setProfile(p => ({ ...p, risk_style: rs.key }))}
+                            className={`text-left px-3 py-2 rounded-md border transition-colors ${
+                              on
+                                ? "bg-blue-600/20 border-blue-500 text-white"
+                                : "bg-slate-950 border-slate-700 text-slate-300 hover:border-slate-600"
+                            }`}>
+                      <div className="text-sm font-semibold">{rs.label}</div>
+                      <div className="text-xs text-slate-400">{rs.hint}</div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Task #181 — Font + color theme customization. */}
+        <Card className="bg-slate-900 border-slate-800">
+          <CardHeader>
+            <CardTitle className="text-white flex items-center gap-2">
+              <Palette className="w-5 h-5 text-blue-400"/> Theme
+            </CardTitle>
+            <p className="text-xs text-slate-400 mt-1">
+              Change TradeCore's accent color and font. Applied immediately, saved to your browser.
+            </p>
+          </CardHeader>
+          <CardContent className="space-y-5">
+            <div className="space-y-2">
+              <Label className="text-slate-300 text-sm">Accent color</Label>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                {THEME_ACCENTS.map(a => {
+                  const on = (theme.accent || "blue") === a.key;
+                  return (
+                    <button key={a.key} type="button"
+                            onClick={() => setTheme(t => ({ ...t, accent: a.key }))}
+                            className={`px-3 py-2 rounded-md border transition-all ${
+                              on ? "border-white ring-2 ring-white/30" : "border-slate-700 hover:border-slate-600"
+                            }`}
+                            style={{ background: `hsl(${a.css} / 0.15)` }}>
+                      <div className="w-full h-2 rounded-full mb-1.5" style={{ background: `hsl(${a.css})` }}/>
+                      <div className="text-xs text-white text-left font-semibold">{a.label}</div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <Label className="text-slate-300 text-sm">Font family</Label>
+              <div className="grid grid-cols-1 gap-2">
+                {THEME_FONTS.map(f => {
+                  const on = (theme.font || "system") === f.key;
+                  return (
+                    <button key={f.key} type="button"
+                            onClick={() => setTheme(t => ({ ...t, font: f.key }))}
+                            className={`text-left px-3 py-2 rounded-md border transition-colors ${
+                              on
+                                ? "bg-blue-600/20 border-blue-500 text-white"
+                                : "bg-slate-950 border-slate-700 text-slate-300 hover:border-slate-600"
+                            }`}
+                            style={{ fontFamily: f.css }}>
+                      <div className="text-sm font-semibold">{f.label}</div>
+                      <div className="text-xs text-slate-400">The quick brown fox — 0123456789</div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <button type="button"
+                    onClick={() => { setTheme({}); applyTheme({}); }}
+                    className="text-xs text-slate-400 hover:text-white underline">
+              Reset to defaults
+            </button>
+          </CardContent>
+        </Card>
+
+        <NotifyDeliveryCard />
+
         <Card className="bg-slate-900 border-slate-800">
           <CardHeader><CardTitle className="text-white">Notification Settings</CardTitle></CardHeader>
           <CardContent className="space-y-4">
-            <div className="flex items-center justify-between"><Label>London Automation Chat</Label><Switch checked={settings.notification_settings.london_automation} onCheckedChange={(val) => handleUpdate('notification_settings', 'london_automation', val)} /></div>
-            <div className="flex items-center justify-between"><Label>NY ORB Strategy Chat</Label><Switch checked={settings.notification_settings.ny_orb_strategy} onCheckedChange={(val) => handleUpdate('notification_settings', 'ny_orb_strategy', val)} /></div>
-            <div className="flex items-center justify-between"><Label>Daily Levels Chat</Label><Switch checked={settings.notification_settings.daily_levels} onCheckedChange={(val) => handleUpdate('notification_settings', 'daily_levels', val)} /></div>
-            <div className="flex items-center justify-between"><Label>Support & Community</Label><Switch checked={settings.notification_settings.support_community} onCheckedChange={(val) => handleUpdate('notification_settings', 'support_community', val)} /></div>
-            <div className="flex items-center justify-between"><Label>Enable AI Assistant</Label><Switch checked={settings.notification_settings.enable_ai} onCheckedChange={(val) => handleUpdate('notification_settings', 'enable_ai', val)} /></div>
+            <div className="flex items-center justify-between">
+              <Label className="text-white text-base">Position Hit</Label>
+              <Switch checked={settings.notification_settings.position_hit ?? true}
+                      onCheckedChange={(val) => handleUpdate('notification_settings', 'position_hit', val)} />
+            </div>
+            <div className="flex items-center justify-between">
+              <Label className="text-white text-base">Entry Filled</Label>
+              <Switch checked={settings.notification_settings.entry_filled ?? true}
+                      onCheckedChange={(val) => handleUpdate('notification_settings', 'entry_filled', val)} />
+            </div>
+            <div className="flex items-center justify-between">
+              <Label className="text-white text-base">Price Near Key Level</Label>
+              <Switch checked={settings.notification_settings.price_near_level ?? false}
+                      onCheckedChange={(val) => handleUpdate('notification_settings', 'price_near_level', val)} />
+            </div>
+            <div className="flex items-center justify-between">
+              <Label className="text-white text-base">Stop Moved (BE / Trail / Creep)</Label>
+              <Switch checked={settings.notification_settings.stop_moved ?? true}
+                      onCheckedChange={(val) => handleUpdate('notification_settings', 'stop_moved', val)} />
+            </div>
+            <div className="flex items-center justify-between">
+              <Label className="text-white text-base">Emergency Close Fired</Label>
+              <Switch checked={settings.notification_settings.emergency_close ?? true}
+                      onCheckedChange={(val) => handleUpdate('notification_settings', 'emergency_close', val)} />
+            </div>
+            <div className="flex items-center justify-between">
+              <Label className="text-white text-base">Daily Loss Approaching Limit</Label>
+              <Switch checked={settings.notification_settings.daily_loss_approaching ?? true}
+                      onCheckedChange={(val) => handleUpdate('notification_settings', 'daily_loss_approaching', val)} />
+            </div>
+            <div className="flex items-center justify-between">
+              <Label className="text-white text-base">Prop Firm Rule Warning</Label>
+              <Switch checked={settings.notification_settings.prop_firm_warning ?? true}
+                      onCheckedChange={(val) => handleUpdate('notification_settings', 'prop_firm_warning', val)} />
+            </div>
           </CardContent>
         </Card>
 

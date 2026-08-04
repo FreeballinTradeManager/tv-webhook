@@ -1,0 +1,49 @@
+// ============================================================================
+// Freeballin Pro v17.9.15 (v2.1.1 / v2.4 profile) — SECOND automation lane
+// Source dropped by trader on 2026-08-02.
+//
+// Alert JSON envelopes (verbatim, source-derived — DIFFER from v2.74 in
+// key fields; both lanes coexist so seed templates must match each):
+//
+//   ENTRY (PickMyTrade):
+//     {"symbol":"MNQ1!","date":"...","data":"buy","quantity":10,
+//      "risk_percentage":0,"price":24521.25,"gtd_in_second":0,
+//      "stp_limit_stp_price":0,"update_tp":false,"update_sl":false,
+//      "breakeven_offset":0,"token":"...","pyramid":false,
+//      "same_direction_ignore":false,"reverse_order_close":false,
+//      "order_type":"MKT",
+//      "advance_tp_sl":[...same bracket-group shape as v2.74...],
+//      "multiple_accounts":[...]}
+//     ← NO `duplicate_position_allow` field at all in v17.9.15 entry
+//        (v2.74 sends `duplicate_position_allow:false`)
+//
+//   CLOSE (FORCE_FLAT / regular exit):
+//     {"symbol":"MNQ1!","data":"CLOSE","quantity":0,"full_closed":true,
+//      "token":"...","account_id":"...","risk_percentage":0.0,
+//      "comment":"","breakeven":0,"trail_stop":0,"trail_trigger":0,
+//      "trail_freq":0,"trail":0,"price":0,"tp":0,"stp_limit_stp_price":0,
+//      "sl":0,"main_token_type":"DEMO",
+//      "duplicate_position_allow":true,           ← v17.9.15 sends TRUE on close
+//                                                    (v2.74 sends false)
+//      "order_type":null,"dollar_tp":0,"dollar_sl":0,
+//      "reverse_order_close":false,"update_tp":false,"update_sl":false,
+//      "percentage_tp":0,"percentage_sl":0,"same_direction_ignore":false,
+//      "gtd_in_second":0,"date":"...","reverse_action":false,
+//      "created_first":"","strategy_name":"","tif":"GTC",
+//      "breakeven_offset":0}
+//
+//   SL UPDATE (BE / JUMP):
+//     {"symbol":"MNQ1!","data":"buy","quantity":10,"update_sl":true,
+//      "update_tp":false,"sl":24515.00,"token":"...",
+//      "same_direction_ignore":true,             ← v17.9.15 uses TRUE
+//                                                    (v2.74 uses false)
+//      "account_id":"..."}
+//     ← NO `duplicate_position_allow` / NO `multiple_accounts` in v17.9.15
+//        (v2.74 includes both)
+//
+// Also: v17.9.15 supports TradersPost alongside PMT (whSys enum has both);
+// v2.74 is PMT-only in this build.
+//
+// Full Pine source not embedded — this file is the reference/annotation
+// only. Working copy lives in TradingView.
+// ============================================================================

@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { Vault } from "@/entities/all";
+import VaultLock from "@/components/VaultLock";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -19,7 +20,7 @@ const CATEGORIES = [
   { value: "prop_firm", label: "Prop Firm", color: "bg-purple-500/10 text-purple-400 border-purple-500/30" },
   { value: "broker", label: "Broker", color: "bg-blue-500/10 text-blue-400 border-blue-500/30" },
   { value: "tradingview", label: "TradingView", color: "bg-cyan-500/10 text-cyan-400 border-cyan-500/30" },
-  { value: "exchange", label: "Exchange", color: "bg-orange-500/10 text-orange-400 border-orange-500/30" },
+  { value: "exchange", label: "Exchange", color: "bg-slate-800 text-slate-200 border-slate-600" },
   { value: "email", label: "Email", color: "bg-green-500/10 text-green-400 border-green-500/30" },
   { value: "other", label: "Other", color: "bg-slate-500/10 text-slate-400 border-slate-500/30" },
 ];
@@ -85,7 +86,11 @@ function VaultEntryForm({ entry, onSave }) {
   );
 }
 
-export default function VaultPage() {
+export default function VaultPageGated() {
+  return <VaultLock><VaultPageInner/></VaultLock>;
+}
+
+function VaultPageInner() {
   const [entries, setEntries] = useState([]);
   const [loading, setLoading] = useState(true);
   const [revealed, setRevealed] = useState({}); // { entryId: "plaintext" }
@@ -159,7 +164,7 @@ export default function VaultPage() {
         <div className="flex justify-between items-start md:items-center flex-col md:flex-row gap-4">
           <div>
             <h1 className="text-3xl font-bold text-white flex items-center gap-2">
-              <KeyRound className="w-7 h-7 text-yellow-500"/> Password Vault
+              <KeyRound className="w-7 h-7 text-blue-500"/> Password Vault
             </h1>
             <p className="text-slate-400 mt-1">
               Encrypted store for prop firm portals, broker logins, TradingView, and other credentials.
@@ -187,11 +192,11 @@ export default function VaultPage() {
           </div>
         )}
 
-        <Card className="bg-slate-900 border-slate-800 border-l-4 border-l-yellow-500">
+        <Card className="bg-slate-900 border-slate-800 border-l-4 border-l-blue-500">
           <CardContent className="p-4 text-sm text-slate-300 flex items-start gap-3">
-            <Shield className="w-5 h-5 text-yellow-500 shrink-0 mt-0.5"/>
+            <Shield className="w-5 h-5 text-blue-400 shrink-0 mt-0.5"/>
             <div>
-              <strong className="text-yellow-400">Set VAULT_KEY in Railway env</strong> to make entries survive
+              <strong className="text-white">Set VAULT_KEY in Railway env</strong> to make entries survive
               restarts. Right now the server uses an ephemeral key — entries will lose their passwords on redeploy.
               Generate one with: <code className="bg-slate-800 px-1.5 py-0.5 rounded text-xs">python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"</code>
             </div>

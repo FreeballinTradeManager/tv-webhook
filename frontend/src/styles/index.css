@@ -88,5 +88,74 @@
 
   body {
     @apply bg-background text-foreground;
+    /* Rounded, friendly sans-serif — SF Pro Rounded on Mac, other rounded
+       fallbacks otherwise. Explicitly avoids monospace ("old computer"). */
+    font-family: -apple-system-rounded, "SF Pro Rounded", "Nunito",
+                 "Quicksand", "Comfortaa", -apple-system, BlinkMacSystemFont,
+                 "Segoe UI", "Helvetica Neue", Arial, system-ui, sans-serif;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11", "ss01";
+    -webkit-font-smoothing: antialiased;
+    letter-spacing: -0.005em;
   }
+}
+
+/* Force the friendly font on absolutely everything — beats any lingering
+   Tailwind font-sans/font-mono overrides at the app level. */
+html, body, div, span, p, h1, h2, h3, h4, h5, h6, button, input, select,
+textarea, table, td, th, li, a, label {
+  font-family: -apple-system-rounded, "SF Pro Rounded", "Nunito",
+               "Quicksand", "Comfortaa", -apple-system, BlinkMacSystemFont,
+               "Segoe UI", "Helvetica Neue", Arial, system-ui, sans-serif !important;
+}
+
+/* ────────────────────────────────────────────────────────────
+   Global readability overrides — TradeCore theme rules
+   Rule: NO yellow/amber/orange/brown anywhere. Everything is
+   white or a high-contrast slate on dark backgrounds. Semantic
+   red for danger, emerald for wins — that's it.
+   Covers every shade (100-900) and every property (text/bg/
+   border/fill/stroke) so labels can never come back gold or brown.
+   ──────────────────────────────────────────────────────────── */
+[class*="text-yellow-"], [class*="text-amber-"], [class*="text-orange-"] {
+  color: #ffffff !important;
+}
+
+/* fill / stroke — SVG icons don't inherit `color`, so class-based
+   `fill-yellow-*` / `stroke-amber-*` need their own reset. */
+[class*="fill-yellow-"], [class*="fill-amber-"], [class*="fill-orange-"] {
+  fill: #ffffff !important;
+}
+[class*="stroke-yellow-"], [class*="stroke-amber-"], [class*="stroke-orange-"] {
+  stroke: #ffffff !important;
+}
+
+/* Backgrounds — every shade + every opacity modifier collapses to slate. */
+[class*="bg-yellow-"], [class*="bg-amber-"], [class*="bg-orange-"] {
+  background-color: rgba(51, 65, 85, 0.6) !important; /* slate-700/60 */
+}
+
+/* Borders — same rule, quiet slate-600. */
+[class*="border-yellow-"], [class*="border-amber-"], [class*="border-orange-"] {
+  border-color: rgb(71, 85, 105) !important; /* slate-600 */
+}
+
+/* Accent color for form checkboxes/radios (accent-yellow-500 etc.) → blue. */
+[class*="accent-yellow-"], [class*="accent-amber-"], [class*="accent-orange-"] {
+  accent-color: #2563eb !important; /* blue-600 */
+}
+
+/* Actual buttons that were solid yellow/amber → solid red, since
+   they're always danger/warn callouts in our design. */
+button[class*="bg-yellow-"], button[class*="bg-amber-"], button[class*="bg-orange-"] {
+  background-color: #dc2626 !important; /* red-600 solid */
+  color: #ffffff !important;
+}
+
+/* Labels (both shadcn <Label> and native <label>) can never be
+   yellow/amber/orange regardless of what class the caller passed. */
+label, [data-radix-collection-item] {
+  color: #f8fafc !important; /* slate-50 */
+}
+label[class*="text-yellow-"], label[class*="text-amber-"], label[class*="text-orange-"] {
+  color: #f8fafc !important;
 }

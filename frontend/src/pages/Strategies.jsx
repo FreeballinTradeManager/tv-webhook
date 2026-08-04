@@ -1,8 +1,10 @@
 import React, { useState, useEffect } from "react";
 import { Strategy } from "@/entities/all";
+import { SEED_STRATEGIES, seedRowFor } from "@/lib/seed_strategies";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Plus, Trash2, Edit, Copy, Link2, Zap, Code2 } from "lucide-react";
+import { Plus, Trash2, Edit, Copy, Link2, Zap, Code2, Files } from "lucide-react";
+import { useContextMenu } from "@/components/RightClickMenu";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter, DialogClose
 } from "@/components/ui/dialog";
@@ -60,6 +62,85 @@ function StrategyForm({ strategy, onSave }) {
           <Input value={formData.timeframe || "15m"} onChange={(e) => handleChange('timeframe', e.target.value)}
                  placeholder="1m / 5m / 15m / 1h / 4h / D"
                  className="bg-slate-700 border-slate-600"/>
+        </div>
+      </div>
+      {/* Task #147 — per-asset strategies. Comma-separate to run one
+          strategy across a basket (e.g. "MNQ, NQ"); use a separate
+          strategy row per asset when config differs (MNQ Trade Manager
+          vs MGC Trade Manager). */}
+      <div className="space-y-2">
+        <Label className="text-slate-300">Assets / Symbols</Label>
+        <Input
+          value={Array.isArray(formData.preferred_pairs) ? formData.preferred_pairs.join(", ") : (formData.preferred_pairs || "")}
+          onChange={(e) => {
+            const arr = e.target.value.split(",").map(s => s.trim().toUpperCase()).filter(Boolean);
+            handleChange('preferred_pairs', arr);
+          }}
+          placeholder="e.g. MNQ    or    MGC    or    MNQ, NQ"
+          className="bg-slate-700 border-slate-600 uppercase"/>
+        <p className="text-xs text-slate-500">
+          One strategy per asset when settings differ — MNQ Trade Manager and MGC Trade Manager run at the same time as separate rows.
+        </p>
+      </div>
+      {/* Task #147 continued — bracket defaults live on the strategy.
+          Dashboard slots pull these when created and can Sync from
+          strategy later if you change the contract count / TP ticks. */}
+      <div className="space-y-3 pt-2 border-t border-slate-700">
+        <div>
+          <Label className="text-slate-300 text-sm">Bracket defaults</Label>
+          <p className="text-xs text-slate-500 mt-0.5">
+            Slots inherit these when created. Change contracts here → Dashboard slot "Sync from strategy" pulls the update.
+          </p>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <div className="space-y-1">
+            <Label className="text-slate-400 text-xs">Contracts</Label>
+            <Input type="number" min="0" step="1"
+                   value={formData.default_contracts ?? ""}
+                   onChange={(e) => handleChange('default_contracts', e.target.value === "" ? null : Number(e.target.value))}
+                   placeholder="e.g. 3"
+                   className="bg-slate-700 border-slate-600 h-9"/>
+          </div>
+          <div className="space-y-1">
+            <Label className="text-slate-400 text-xs">Stop (ticks)</Label>
+            <Input type="number" min="0" step="1"
+                   value={formData.default_stop_ticks ?? ""}
+                   onChange={(e) => handleChange('default_stop_ticks', e.target.value === "" ? null : Number(e.target.value))}
+                   placeholder="e.g. 80"
+                   className="bg-slate-700 border-slate-600 h-9"/>
+          </div>
+          <div className="space-y-1">
+            <Label className="text-slate-400 text-xs">TP1 (ticks)</Label>
+            <Input type="number" min="0" step="1"
+                   value={formData.default_tp1_ticks ?? ""}
+                   onChange={(e) => handleChange('default_tp1_ticks', e.target.value === "" ? null : Number(e.target.value))}
+                   placeholder="e.g. 40"
+                   className="bg-slate-700 border-slate-600 h-9"/>
+          </div>
+          <div className="space-y-1">
+            <Label className="text-slate-400 text-xs">TP2 (ticks)</Label>
+            <Input type="number" min="0" step="1"
+                   value={formData.default_tp2_ticks ?? ""}
+                   onChange={(e) => handleChange('default_tp2_ticks', e.target.value === "" ? null : Number(e.target.value))}
+                   placeholder="e.g. 80"
+                   className="bg-slate-700 border-slate-600 h-9"/>
+          </div>
+          <div className="space-y-1">
+            <Label className="text-slate-400 text-xs">TP3 (ticks)</Label>
+            <Input type="number" min="0" step="1"
+                   value={formData.default_tp3_ticks ?? ""}
+                   onChange={(e) => handleChange('default_tp3_ticks', e.target.value === "" ? null : Number(e.target.value))}
+                   placeholder="e.g. 120"
+                   className="bg-slate-700 border-slate-600 h-9"/>
+          </div>
+          <div className="space-y-1">
+            <Label className="text-slate-400 text-xs">Runner qty</Label>
+            <Input type="number" min="0" step="1"
+                   value={formData.default_runner_qty ?? ""}
+                   onChange={(e) => handleChange('default_runner_qty', e.target.value === "" ? null : Number(e.target.value))}
+                   placeholder="e.g. 1"
+                   className="bg-slate-700 border-slate-600 h-9"/>
+          </div>
         </div>
       </div>
       <div className="space-y-2">
@@ -160,6 +241,92 @@ function AlertTemplatesDialog({ strategy, open, onOpenChange }) {
   );
 }
 
+function StrategyCard({ s, onEdit, onDelete, onDuplicate, onCopyUrl, onCopyJson, onOpenTemplates }) {
+  const { menuProps, menu } = useContextMenu([
+    { header: s.name || "Strategy" },
+    { label: "Edit strategy",   icon: <Edit className="w-4 h-4"/>,   onClick: onEdit, kbd: "dbl-click" },
+    { label: "Duplicate",       icon: <Files className="w-4 h-4"/>,  onClick: onDuplicate },
+    { label: "Alert JSON…",     icon: <Code2 className="w-4 h-4"/>,  onClick: onOpenTemplates },
+    s.webhook_url && { label: "Copy webhook URL", icon: <Copy className="w-4 h-4"/>, onClick: onCopyUrl },
+    { label: "Copy row as JSON", icon: <Copy className="w-4 h-4"/>, onClick: onCopyJson },
+    { separator: true },
+    { label: "Delete strategy", icon: <Trash2 className="w-4 h-4"/>, onClick: onDelete, danger: true },
+  ].filter(Boolean));
+  return (
+    <>
+    <Card {...menuProps} onDoubleClick={onEdit}
+          title="Right-click for actions · Double-click to edit"
+          className="bg-slate-900 border-slate-800 flex flex-col">
+                <CardHeader>
+                  <div className="flex items-start justify-between gap-2">
+                    <CardTitle className="text-white">{s.name}</CardTitle>
+                    {Array.isArray(s.preferred_pairs) && s.preferred_pairs.length > 0 && (
+                      <div className="flex flex-wrap gap-1 justify-end">
+                        {s.preferred_pairs.map(sym => (
+                          <span key={sym} className="text-[10px] font-bold px-2 py-0.5 rounded bg-blue-600 text-white uppercase tracking-wide">
+                            {sym}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  <p className="text-sm text-slate-400 pt-1 line-clamp-2">{s.description}</p>
+                </CardHeader>
+                <CardContent className="flex-grow space-y-3">
+                  {(s.default_contracts != null || s.default_stop_ticks != null || s.default_tp1_ticks != null) && (
+                    <div className="rounded-md bg-slate-950 border border-slate-800 p-2.5 grid grid-cols-6 gap-1 text-center text-[11px]">
+                      {[
+                        { k: "default_contracts", label: "CT" },
+                        { k: "default_stop_ticks", label: "SL" },
+                        { k: "default_tp1_ticks", label: "TP1" },
+                        { k: "default_tp2_ticks", label: "TP2" },
+                        { k: "default_tp3_ticks", label: "TP3" },
+                        { k: "default_runner_qty", label: "RUN" },
+                      ].map(({k, label}) => (
+                        <div key={k} className="space-y-0.5">
+                          <div className="text-slate-500 uppercase tracking-wider text-[9px]">{label}</div>
+                          <div className="text-white font-semibold tabular-nums">{s[k] ?? "—"}</div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <div className="flex justify-between text-slate-300"><span>Win Rate</span> <Badge className="bg-blue-500/20 text-blue-300">{s.win_rate?.toFixed(1) || 0}%</Badge></div>
+                  <div className="flex justify-between text-slate-300"><span>Total P&L</span> <span className={s.total_profit >= 0 ? 'text-green-500' : 'text-red-500'}>${s.total_profit?.toFixed(2) || 0}</span></div>
+                  <div className="flex justify-between text-slate-300"><span>Total Trades</span> <span>{s.total_trades || 0}</span></div>
+                  {s.broker_format && (
+                    <div className="flex justify-between text-slate-300 pt-2 border-t border-slate-800">
+                      <span>Broker Format</span>
+                      <Badge variant="outline" className="bg-slate-800 text-slate-200 border-slate-600 capitalize">{s.broker_format}</Badge>
+                    </div>
+                  )}
+                  {s.webhook_url && (
+                    <div className="space-y-1 pt-2 border-t border-slate-800">
+                      <div className="text-xs text-slate-500 flex items-center gap-1"><Link2 className="w-3 h-3"/> Webhook URL</div>
+                      <div className="flex gap-1">
+                        <code className="flex-1 text-xs bg-slate-800 rounded px-2 py-1 text-blue-400 truncate">{s.webhook_url}</code>
+                        <Button size="icon" variant="ghost" className="h-7 w-7" onClick={onCopyUrl} title="Copy URL">
+                          <Copy className="w-3 h-3 text-slate-400"/>
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+                </CardContent>
+                <div className="p-4 flex justify-between items-center gap-2 border-t border-slate-800">
+                  <Button size="sm" variant="outline" onClick={onOpenTemplates}
+                          className="border-blue-500/30 text-blue-400 hover:bg-blue-500/10">
+                    <Code2 className="w-3 h-3 mr-1"/> Alert JSON
+                  </Button>
+                  <div className="flex gap-1">
+                    <Button variant="ghost" size="icon" onClick={onDelete}><Trash2 className="w-4 h-4 text-red-500"/></Button>
+                    <Button variant="ghost" size="icon" onClick={onEdit}><Edit className="w-4 h-4 text-slate-400"/></Button>
+                  </div>
+                </div>
+              </Card>
+    {menu}
+    </>
+  );
+}
+
 export default function StrategiesPage() {
   const [strategies, setStrategies] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -195,9 +362,44 @@ export default function StrategiesPage() {
     }
   };
 
+  const handleSeedMine = async () => {
+    if (!window.confirm(
+      "Create the three canonical strategies?\n\n" +
+      "  · Freeballin Pro Auto v2.74 — 6.24 base (auto)\n" +
+      "  · FREEBALLIN v17.9.15 (2.1.1 / 2.4) (auto)\n" +
+      "  · TM v20.87 — STOPS (manual)\n\n" +
+      "Each will show up with PMT + TradersPost + Trade Engine alert JSON " +
+      "templates already filled in. Placeholders like {{PMT_TOKEN}} you " +
+      "swap per account. Existing strategies with the same name are skipped."
+    )) return;
+    let created = 0, skipped = 0;
+    const existingNames = new Set((strategies || []).map(s => (s.name || "").toLowerCase()));
+    for (const preset of SEED_STRATEGIES) {
+      if (existingNames.has(preset.name.toLowerCase())) { skipped += 1; continue; }
+      try {
+        await Strategy.create(seedRowFor(preset));
+        created += 1;
+      } catch (e) { console.warn("seed failed:", preset.key, e); }
+    }
+    alert(`Seed complete — ${created} created, ${skipped} already existed.`);
+    loadStrategies();
+  };
+
+  const handleDuplicate = async (s) => {
+    const { id, webhook_url, webhook_slug, created_date, updated_date, ...rest } = s;
+    try {
+      await Strategy.create({ ...rest, name: `${s.name || "Strategy"} (copy)` });
+      loadStrategies();
+    } catch (e) { alert(`Duplicate failed: ${e.message}`); }
+  };
+
   const [templatesFor, setTemplatesFor] = useState(null);   // strategy object or null
   const copyUrl = async (url) => {
     try { await navigator.clipboard.writeText(url); }
+    catch { alert("Clipboard blocked"); }
+  };
+  const copyJson = async (obj) => {
+    try { await navigator.clipboard.writeText(JSON.stringify(obj, null, 2)); }
     catch { alert("Clipboard blocked"); }
   };
 
@@ -209,6 +411,11 @@ export default function StrategiesPage() {
             <h1 className="text-3xl font-bold text-white">Strategy Library</h1>
             <p className="text-slate-400">Manage and analyze your trading strategies.</p>
           </div>
+          <div className="flex items-center gap-2">
+            <Button variant="outline" onClick={handleSeedMine}
+                    className="border-emerald-600/60 text-emerald-300 hover:bg-emerald-950/30">
+              Seed my 3 strategies
+            </Button>
           <Dialog open={isFormOpen} onOpenChange={setIsFormOpen}>
             <DialogTrigger asChild><Button onClick={() => setEditingStrategy(null)} className="bg-blue-600 hover:bg-blue-700"><Plus className="w-4 h-4 mr-2"/>New Strategy</Button></DialogTrigger>
             <DialogContent className="sm:max-w-[525px] bg-slate-800 border-slate-700 text-white">
@@ -216,6 +423,7 @@ export default function StrategiesPage() {
               <StrategyForm strategy={editingStrategy} onSave={handleSave} />
             </DialogContent>
           </Dialog>
+          </div>
         </div>
 
         {loading ? (
@@ -225,44 +433,16 @@ export default function StrategiesPage() {
         ) : (
           <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
             {strategies.map(s => (
-              <Card key={s.id} className="bg-slate-900 border-slate-800 flex flex-col">
-                <CardHeader>
-                  <CardTitle className="text-white">{s.name}</CardTitle>
-                  <p className="text-sm text-slate-400 pt-1 line-clamp-2">{s.description}</p>
-                </CardHeader>
-                <CardContent className="flex-grow space-y-3">
-                  <div className="flex justify-between text-slate-300"><span>Win Rate</span> <Badge className="bg-blue-500/20 text-blue-300">{s.win_rate?.toFixed(1) || 0}%</Badge></div>
-                  <div className="flex justify-between text-slate-300"><span>Total P&L</span> <span className={s.total_profit >= 0 ? 'text-green-500' : 'text-red-500'}>${s.total_profit?.toFixed(2) || 0}</span></div>
-                  <div className="flex justify-between text-slate-300"><span>Total Trades</span> <span>{s.total_trades || 0}</span></div>
-                  {s.broker_format && (
-                    <div className="flex justify-between text-slate-300 pt-2 border-t border-slate-800">
-                      <span>Broker Format</span>
-                      <Badge variant="outline" className="bg-orange-500/10 text-orange-400 border-orange-500/30 capitalize">{s.broker_format}</Badge>
-                    </div>
-                  )}
-                  {s.webhook_url && (
-                    <div className="space-y-1 pt-2 border-t border-slate-800">
-                      <div className="text-xs text-slate-500 flex items-center gap-1"><Link2 className="w-3 h-3"/> Webhook URL</div>
-                      <div className="flex gap-1">
-                        <code className="flex-1 text-xs bg-slate-800 rounded px-2 py-1 text-blue-400 truncate">{s.webhook_url}</code>
-                        <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => copyUrl(s.webhook_url)} title="Copy URL">
-                          <Copy className="w-3 h-3 text-slate-400"/>
-                        </Button>
-                      </div>
-                    </div>
-                  )}
-                </CardContent>
-                <div className="p-4 flex justify-between items-center gap-2 border-t border-slate-800">
-                  <Button size="sm" variant="outline" onClick={() => setTemplatesFor(s)}
-                          className="border-blue-500/30 text-blue-400 hover:bg-blue-500/10">
-                    <Code2 className="w-3 h-3 mr-1"/> Alert JSON
-                  </Button>
-                  <div className="flex gap-1">
-                    <Button variant="ghost" size="icon" onClick={() => handleDelete(s.id)}><Trash2 className="w-4 h-4 text-red-500"/></Button>
-                    <Button variant="ghost" size="icon" onClick={() => { setEditingStrategy(s); setIsFormOpen(true); }}><Edit className="w-4 h-4 text-slate-400"/></Button>
-                  </div>
-                </div>
-              </Card>
+              <StrategyCard
+                key={s.id}
+                s={s}
+                onEdit={() => { setEditingStrategy(s); setIsFormOpen(true); }}
+                onDelete={() => handleDelete(s.id)}
+                onDuplicate={() => handleDuplicate(s)}
+                onCopyUrl={() => copyUrl(s.webhook_url)}
+                onCopyJson={() => copyJson(s)}
+                onOpenTemplates={() => setTemplatesFor(s)}
+              />
             ))}
           </div>
         )}

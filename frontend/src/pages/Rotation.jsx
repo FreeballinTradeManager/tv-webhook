@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import { Group, Account, Strategy } from "@/entities/all";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -11,27 +11,29 @@ import {
 } from "@/components/ui/dialog";
 import {
   Users, ArrowRight, Plus, Trash2, Zap, Repeat, Trophy,
-  Clock, Link2, UserPlus, Save, X, BookOpen, ShieldAlert
+  Clock, Link2, UserPlus, Save, X, BookOpen, ShieldAlert,
+  Copy, Pencil, Power,
 } from "lucide-react";
+import { useContextMenu } from "@/components/RightClickMenu";
 
-// Preset time windows for common sessions. Each preset has its own
-// accent color so the buttons are legible on our dark theme (default
-// shadcn outline was rendering as a muddy brown).
+// Preset time windows for common sessions.
+// Locked Pine palette — no pink, no washed-out 15%-opacity backgrounds.
+// Solid fills + white text so the buttons read at a glance.
 const SESSION_PRESETS = [
   {
     label: "London",
     windows: [{start:"03:00",end:"12:00",tz:"America/New_York"}],
-    cls: "bg-blue-500/15 border-blue-500/50 text-blue-300 hover:bg-blue-500/25 hover:text-blue-200",
+    cls: "bg-blue-600 hover:bg-blue-700 text-white border border-blue-500",
   },
   {
     label: "New York",
     windows: [{start:"08:00",end:"17:00",tz:"America/New_York"}],
-    cls: "bg-pink-500/15 border-pink-500/50 text-pink-300 hover:bg-pink-500/25 hover:text-pink-200",
+    cls: "bg-teal-600 hover:bg-teal-700 text-white border border-teal-500",
   },
   {
     label: "Asian",
     windows: [{start:"20:00",end:"02:00",tz:"America/New_York"}],
-    cls: "bg-slate-500/15 border-slate-400/40 text-slate-300 hover:bg-slate-500/25 hover:text-slate-200",
+    cls: "bg-slate-700 hover:bg-slate-600 text-white border border-slate-600",
   },
   {
     label: "Big Risk",
@@ -39,12 +41,12 @@ const SESSION_PRESETS = [
       {start:"18:00",end:"01:00",tz:"America/New_York"},
       {start:"11:45",end:"15:00",tz:"America/New_York"},
     ],
-    cls: "bg-red-500/15 border-red-500/50 text-red-300 hover:bg-red-500/25 hover:text-red-200",
+    cls: "bg-red-600 hover:bg-red-700 text-white border border-red-500",
   },
   {
     label: "24/7",
     windows: [],
-    cls: "bg-green-500/15 border-green-500/50 text-green-300 hover:bg-green-500/25 hover:text-green-200",
+    cls: "bg-emerald-600 hover:bg-emerald-700 text-white border border-emerald-500",
   },
 ];
 
@@ -123,7 +125,7 @@ function TimeWindowsEditor({ windows, onChange }) {
 }
 
 function GroupCard({ group, allGroups, allAccounts, allStrategies, onUpdate, onDelete,
-                    onAddMember, onDeleteMember, groupIndex }) {
+                    onAddMember, onDeleteMember, onDuplicate, groupIndex }) {
   const [edit, setEdit] = useState({
     name: group.name || "",
     rotate_after_wins: group.rotate_after_wins || "",
@@ -171,25 +173,53 @@ function GroupCard({ group, allGroups, allAccounts, allStrategies, onUpdate, onD
   if (edit.rotate_after_loss_pnl) rules.push(`−$${edit.rotate_after_loss_pnl}`);
   const rulesSummary = rules.length ? rules.join(" · ") : "no triggers";
 
+  // Right-click quick actions on the group card. Task #189.
+  const nameInputRef = useRef(null);
+  const { menuProps, menu } = useContextMenu([
+    { header: `Group ${String.fromCharCode(65 + groupIndex)} · ${edit.name || "(unnamed)"}` },
+    { label: "Rename", icon: <Pencil className="w-4 h-4"/>, onClick: () => nameInputRef.current?.focus() },
+    { label: edit.active ? "Pause" : "Activate",
+      icon: <Power className="w-4 h-4"/>,
+      onClick: () => { set("active", !edit.active); setTimeout(save, 0); } },
+    { label: "Duplicate", icon: <Copy className="w-4 h-4"/>,
+      onClick: () => onDuplicate?.(group) },
+    { separator: true },
+    { label: "Delete group", icon: <Trash2 className="w-4 h-4"/>,
+      danger: true, onClick: () => onDelete(group.id) },
+  ]);
+
   return (
-    <Card className={`bg-slate-900 border-slate-800 ${!edit.active ? "opacity-60" : ""}`}>
+    <Card {...menuProps}
+          title="Right-click for actions"
+          className={`bg-slate-900 border-slate-800 ${!edit.active ? "opacity-60" : ""}`}>
       <CardHeader className="pb-2">
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2 min-w-0 flex-1">
-            <Badge variant="outline" className="bg-blue-500/20 text-blue-300 border-blue-500/50 font-bold shrink-0">
+            <Badge className="bg-blue-600 text-white border-0 font-bold shrink-0 w-8 h-7 flex items-center justify-center text-base">
               {String.fromCharCode(65 + groupIndex)}
             </Badge>
             <Users className="w-5 h-5 text-blue-500 shrink-0"/>
-            <Input value={edit.name} onChange={e => set("name", e.target.value)}
-                   className="bg-transparent border-0 text-white text-xl font-bold p-0 h-auto focus-visible:ring-0 min-w-0"/>
+            {/* Group name — click to edit. Subtle border on hover / focus
+                so users know it's editable. Autosaves on blur so a rename
+                sticks even if they forget to hit "Save changes" below. */}
+            <Input
+              ref={nameInputRef}
+              value={edit.name}
+              onChange={e => set("name", e.target.value)}
+              onBlur={() => { if (dirty) save(); }}
+              onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); e.currentTarget.blur(); } }}
+              title="Click to rename · right-click for more"
+              placeholder="Group name"
+              className="bg-transparent border border-transparent hover:border-slate-700 focus:border-blue-500 text-white text-xl font-bold px-2 h-9 rounded-md focus-visible:ring-0 min-w-0 transition-colors"
+            />
           </div>
           <div className="flex items-center gap-1 shrink-0">
-            <Button size="sm" variant="outline"
+            <Button size="sm"
                     onClick={() => set("active", !edit.active)}
                     className={edit.active
-                      ? "h-7 bg-green-500/15 border-green-500/50 text-green-300 hover:bg-green-500/25 hover:text-green-200"
-                      : "h-7 bg-slate-800 border-slate-600 text-slate-400 hover:bg-slate-700 hover:text-slate-200"}>
-              {edit.active ? "🟢 Active" : "⚪ Paused"}
+                      ? "h-7 bg-emerald-600 hover:bg-emerald-700 text-white border-0 font-semibold"
+                      : "h-7 bg-slate-700 hover:bg-slate-600 text-slate-200 border border-slate-600"}>
+              {edit.active ? "● Active" : "○ Paused"}
             </Button>
             <Button size="icon" variant="ghost" onClick={() => onDelete(group.id)} className="h-7 w-7">
               <Trash2 className="w-4 h-4 text-red-500"/>
@@ -200,16 +230,16 @@ function GroupCard({ group, allGroups, allAccounts, allStrategies, onUpdate, onD
 
       <CardContent className="space-y-4 pt-2">
         {/* Section 1: TIME */}
-        <div className="border-l-2 border-blue-500/40 pl-3">
-          <div className="text-xs uppercase text-blue-400 font-semibold mb-2 flex items-center gap-1">
+        <div className="border-l-2 border-blue-500 pl-3">
+          <div className="text-xs uppercase tracking-wider text-white font-semibold mb-2 flex items-center gap-1">
             <Clock className="w-3 h-3"/> Time — when this group is allowed to trade
           </div>
           <TimeWindowsEditor windows={edit.time_windows} onChange={setWindows}/>
         </div>
 
         {/* Section 2: STRATEGY */}
-        <div className="border-l-2 border-purple-500/40 pl-3">
-          <div className="text-xs uppercase text-purple-400 font-semibold mb-2 flex items-center gap-1">
+        <div className="border-l-2 border-purple-500 pl-3">
+          <div className="text-xs uppercase tracking-wider text-white font-semibold mb-2 flex items-center gap-1">
             <BookOpen className="w-3 h-3"/> Strategy — Pine indicators firing into this group
           </div>
           {boundStrategies.length === 0 ? (
@@ -230,8 +260,8 @@ function GroupCard({ group, allGroups, allAccounts, allStrategies, onUpdate, onD
         </div>
 
         {/* Section 3: PROP FIRMS / ACCOUNTS */}
-        <div className="border-l-2 border-green-500/40 pl-3">
-          <div className="text-xs uppercase text-green-400 font-semibold mb-2 flex items-center justify-between">
+        <div className="border-l-2 border-emerald-500 pl-3">
+          <div className="text-xs uppercase tracking-wider text-white font-semibold mb-2 flex items-center justify-between">
             <span className="flex items-center gap-1"><UserPlus className="w-3 h-3"/> Prop Firms — accounts in this group ({memberAccounts.length})</span>
             <Button size="sm" variant="outline" onClick={() => setAddingMember(!addingMember)}
                     className="h-6 text-xs bg-slate-800 border-slate-600 text-slate-200 hover:bg-slate-700 hover:text-white">
@@ -274,7 +304,7 @@ function GroupCard({ group, allGroups, allAccounts, allStrategies, onUpdate, onD
               const stateColor = acc?.state === "active" ? "text-green-400" :
                                  acc?.state === "cooled" ? "text-blue-400" :
                                  acc?.state === "stopped" ? "text-red-400" :
-                                 acc?.state === "benched" ? "text-yellow-400" : "text-slate-400";
+                                 acc?.state === "benched" ? "text-slate-300" : "text-slate-400";
               return (
                 <div key={m.id} className="flex items-center justify-between text-sm bg-slate-800/50 rounded px-2 py-1">
                   <div className="flex items-center gap-2 flex-1 min-w-0">
@@ -293,11 +323,11 @@ function GroupCard({ group, allGroups, allAccounts, allStrategies, onUpdate, onD
           </div>
         </div>
 
-        {/* Section 4: RULES — using amber (warmer, more legible on our dark slate) */}
-        <div className="border-l-2 border-amber-500/50 pl-3">
-          <div className="text-xs uppercase text-amber-400 font-semibold mb-2 flex items-center gap-1">
-            <ShieldAlert className="w-3 h-3"/> Rules — rotate when any trigger hits
-            <span className="ml-auto text-slate-500 normal-case font-normal">Currently: {rulesSummary}</span>
+        {/* Section 4: RULES */}
+        <div className="border-l-2 border-red-500 pl-3">
+          <div className="text-xs uppercase tracking-wider text-white font-semibold mb-2 flex items-center gap-1">
+            <ShieldAlert className="w-3 h-3 text-red-400"/> Rules — rotate when any trigger hits
+            <span className="ml-auto text-slate-400 normal-case font-normal">Currently: {rulesSummary}</span>
           </div>
           <div className="grid grid-cols-4 gap-1.5 text-xs">
             <div>
@@ -334,8 +364,8 @@ function GroupCard({ group, allGroups, allAccounts, allStrategies, onUpdate, onD
         </div>
 
         {/* Section 5: CASCADE CHAIN */}
-        <div className="border-l-2 border-orange-500/40 pl-3">
-          <div className="text-xs uppercase text-orange-400 font-semibold mb-2 flex items-center gap-1">
+        <div className="border-l-2 border-teal-500 pl-3">
+          <div className="text-xs uppercase tracking-wider text-white font-semibold mb-2 flex items-center gap-1">
             <Link2 className="w-3 h-3"/> Rotate Groups — chain to next when exhausted
           </div>
           <Select value={String(edit.next_group_id || "")}
@@ -356,11 +386,12 @@ function GroupCard({ group, allGroups, allAccounts, allStrategies, onUpdate, onD
         </div>
 
         {dirty && (
-          <Button size="sm" onClick={save} className="w-full bg-blue-600 hover:bg-blue-700">
+          <Button size="sm" onClick={save} className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold ring-2 ring-blue-400 shadow-lg shadow-blue-500/30 animate-pulse">
             <Save className="w-3 h-3 mr-1"/>Save Changes
           </Button>
         )}
       </CardContent>
+      {menu}
     </Card>
   );
 }
@@ -416,6 +447,15 @@ export default function RotationPage() {
   const handleAddMember = async (groupId, payload) => { await Group.addMember(groupId, payload); load(); };
   const handleDeleteMember = async (groupId, memberId) => { await Group.deleteMember(groupId, memberId); load(); };
   const handleCreate = async (payload) => { await Group.create(payload); load(); };
+  const handleDuplicate = async (g) => {
+    // Clone group settings but not member accounts — user picks who joins the copy.
+    const {
+      id, members, next_group_id, // strip identity + wiring
+      ...rest
+    } = g;
+    await Group.create({ ...rest, name: `${g.name || "Group"} (copy)` });
+    load();
+  };
 
   const groupedAcctIds = new Set(groups.flatMap(g => (g.members || []).map(m => m.account_id)));
   const standalone = accounts.filter(a => !groupedAcctIds.has(a.id));
@@ -433,7 +473,7 @@ export default function RotationPage() {
               <Repeat className="w-8 h-8 text-blue-500"/> Group Your Trades
             </h1>
             <p className="text-slate-400 mt-1">
-              Each group = <span className="text-blue-400">Time</span> · <span className="text-purple-400">Strategy</span> · <span className="text-green-400">Prop Firms</span> · <span className="text-yellow-400">Rules</span> · <span className="text-orange-400">Rotate Groups A→B→C</span>
+              Each group ties together a <span className="text-white font-semibold">time window</span>, a <span className="text-white font-semibold">strategy</span>, and one or more <span className="text-white font-semibold">prop-firm accounts</span> — with rotation rules that cascade Group A → B → C when limits hit.
             </p>
           </div>
           <Button onClick={() => setNewGroupOpen(true)} className="bg-blue-600 hover:bg-blue-700">
@@ -474,7 +514,8 @@ export default function RotationPage() {
                            group={g} groupIndex={i}
                            allGroups={groups} allAccounts={accounts} allStrategies={strategies}
                            onUpdate={handleUpdate} onDelete={handleDelete}
-                           onAddMember={handleAddMember} onDeleteMember={handleDeleteMember}/>
+                           onAddMember={handleAddMember} onDeleteMember={handleDeleteMember}
+                           onDuplicate={handleDuplicate}/>
               ))}
             </div>
           )}

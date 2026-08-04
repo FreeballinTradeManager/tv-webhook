@@ -1,0 +1,13 @@
+// Freeballin Trade Manager v20.87 — STOPS
+// Source of truth pasted by user 2026-08-02.
+// TradeCore parses the webhook envelopes emitted by this file:
+//   PMT   — {"data":"buy"/"sell"/"CLOSE", strategy_name: "SL BE"/"SL JUMP"/"SL CREEP"/"SL TRAIL"}
+//   TPOST — {"ticker","action":"buy"/"sell"/"exit"/"cancel", quantity, orderType}
+//   TE    — {"event":"ENTRY"/"TP1"/"TP2"/"TP3"/"CLOSE50"/"STOP_HIT"/"EMA_EXIT"/"MASTER_CLOSE"/"STOP_UPDATE"/"CLOSE_FALLBACK", side, ticker, qty, key}
+//
+// Companion frontend parser: frontend/src/lib/pine_signals.js  (TM_EVENTS + parseTMEvent)
+// Companion catalog page:    frontend/src/pages/AlertTemplates.jsx  (Trade Manager section)
+//
+// Full source omitted from this file to keep the repo lean — the canonical
+// copy lives on TradingView. This stub exists so cross-file greps ("TM webhook",
+// "MASTER_CLOSE", "SL TRAIL", "CLOSE50") land next to the parser that reads them.

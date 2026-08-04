@@ -5,7 +5,7 @@ from typing import Optional
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import uuid as _uuid
-from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect, UploadFile, File
+from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect, UploadFile, File, Request
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -18,7 +18,7 @@ from .db import get_db, run_migrations
 from . import models  # noqa: F401
 from .models import (
     WebhookSignal, Position, StopUpdate, Account, Group, GroupMember, BROKER_KINDS,
-    Strategy, TradeAlert, UserSettings, Goal, VaultEntry,
+    Strategy, TradeAlert, UserSettings, Goal, VaultEntry, WebhookRetry,
 )
 from .executor import execute_trade
 from .ws import manager as ws_manager
@@ -1732,6 +1732,366 @@ def webhook_by_group(group_name: str, data: TradeEngineWebhook, db: Session = De
     return webhook(data, db)
 
 
+# ----- Task #172: Demo webhook (trial sandbox) -----------------------------
+# Public sandbox endpoint. Anyone with a trial_key can POST here from a
+# TradingView demo indicator; we log the payload and NEVER route to a real
+# broker. Paired with GET /api/webhook/demo/{trial_key}/events which the
+# Demo page polls to render a live "what would happen" preview.
+#
+# Auth model: trial_key itself is the credential — pick anything hard to
+# guess, share it in the trial link. No admin key required.
+
+@app.post("/api/webhook/demo/{trial_key}")
+async def demo_webhook(trial_key: str, request: Request, db: Session = Depends(get_db)):
+    """Sandbox — accepts any JSON, logs it, returns a preview of what
+    TradeCore's fan-out + safety layer WOULD have done in real trading."""
+    if not trial_key or len(trial_key) < 4:
+        raise HTTPException(status_code=400, detail="trial_key too short (min 4 chars)")
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    payload_str = json.dumps(payload) if payload else (await request.body()).decode("utf-8", "ignore")
+
+    event_type = str(payload.get("event") or payload.get("action") or payload.get("data") or "DEMO").upper()
+    ticker = str(payload.get("ticker") or payload.get("symbol") or "?")
+    side = str(payload.get("side") or payload.get("direction") or "?")
+    qty = int(payload.get("quantity") or payload.get("qty") or 0)
+
+    row = WebhookSignal(
+        event=f"DEMO_{event_type}"[:60],
+        ticker=ticker[:40],
+        side=side[:20],
+        qty=qty,
+        key=f"demo:{trial_key}"[:60],
+        raw_payload=payload_str,
+        trade_id=f"DEMO-{trial_key}",
+    )
+    db.add(row); db.commit(); db.refresh(row)
+
+    return {
+        "accepted": True,
+        "note": "This is a demo endpoint. No real broker order was sent.",
+        "would_have_done": {
+            "event": event_type,
+            "ticker": ticker,
+            "side": side,
+            "qty": qty,
+            "fan_out_target": "sandbox — no accounts touched",
+            "safety_gates_run": ["kill_switch", "guardian", "time_window", "max_positions", "preflight"],
+        },
+        "trial_key": trial_key,
+        "event_id": row.id,
+        "logged_at": row.created_at.isoformat() if row.created_at else None,
+    }
+
+
+@app.get("/api/webhook/demo/{trial_key}/events")
+def demo_webhook_events(trial_key: str, limit: int = 50, db: Session = Depends(get_db)):
+    """Recent demo events for the given trial_key. Feeds the /Demo page's
+    live 'what would happen' preview panel."""
+    if not trial_key or len(trial_key) < 4:
+        raise HTTPException(status_code=400, detail="trial_key too short (min 4 chars)")
+    rows = (
+        db.query(WebhookSignal)
+        .filter(WebhookSignal.key == f"demo:{trial_key}")
+        .order_by(WebhookSignal.id.desc())
+        .limit(min(limit, 200))
+        .all()
+    )
+    return {
+        "trial_key": trial_key,
+        "count": len(rows),
+        "events": [
+            {
+                "id": r.id,
+                "ts": r.created_at.isoformat() if r.created_at else None,
+                "event": r.event,
+                "ticker": r.ticker,
+                "side": r.side,
+                "qty": r.qty,
+                "raw_payload": r.raw_payload,
+            }
+            for r in rows
+        ],
+    }
+
+
+@app.delete("/api/webhook/demo/{trial_key}/events")
+def demo_webhook_clear(trial_key: str, db: Session = Depends(get_db)):
+    """Clear demo events for a trial_key — 'reset the sandbox'."""
+    if not trial_key or len(trial_key) < 4:
+        raise HTTPException(status_code=400, detail="trial_key too short (min 4 chars)")
+    n = db.query(WebhookSignal).filter(WebhookSignal.key == f"demo:{trial_key}").delete()
+    db.commit()
+    return {"cleared": n, "trial_key": trial_key}
+
+
+# ----- Task #139 + #59: General signal log + copy-trade audit ledger -------
+# Feeds the Logs page. Returns recent rows from webhook_signals so the
+# frontend can render + filter by kind (observe / demo / PMT / entry /
+# close / SL) and expand each raw payload. This is READ-only.
+
+@app.get("/api/webhook-signals")
+def list_webhook_signals(limit: int = 200, kind: Optional[str] = None, db: Session = Depends(get_db)):
+    """Recent webhook signals across every intake path (observe, demo,
+    PMT-compat, trade-engine). Feeds the Logs page + copy-trade ledger.
+    Filter by kind: observe / demo / pmt / entry / close / sl.
+    """
+    q = db.query(WebhookSignal).order_by(WebhookSignal.id.desc())
+    k = (kind or "").lower()
+    if k == "observe":
+        q = q.filter(WebhookSignal.key.like("observe:%"))
+    elif k == "demo":
+        q = q.filter(WebhookSignal.key.like("demo:%"))
+    elif k == "pmt":
+        q = q.filter(WebhookSignal.event.like("%PMT%") | WebhookSignal.key.like("%pmt%"))
+    elif k == "entry":
+        q = q.filter((WebhookSignal.event.like("%BUY%")) | (WebhookSignal.event.like("%SELL%")))
+    elif k == "close":
+        q = q.filter(WebhookSignal.event.like("%CLOSE%"))
+    elif k == "sl":
+        q = q.filter(WebhookSignal.event.like("SL%"))
+
+    rows = q.limit(min(max(limit, 1), 500)).all()
+    return {
+        "count": len(rows),
+        "events": [
+            {
+                "id": r.id,
+                "ts": r.created_at.isoformat() if r.created_at else None,
+                "event": r.event,
+                "ticker": r.ticker,
+                "side": r.side,
+                "qty": r.qty,
+                "key": r.key,
+                "trade_id": r.trade_id,
+                "event_id": r.event_id,
+                "raw_payload": r.raw_payload,
+            }
+            for r in rows
+        ],
+    }
+
+
+# ----- Task #134: Webhook retry queue --------------------------------------
+# List / inspect / manually retry / dead-letter management for outbound
+# webhook deliveries that failed. The queue itself (WebhookRetry rows)
+# is populated by the executor when a broker call errors; a background
+# drain task processes pending rows with exponential backoff.
+
+@app.get("/api/webhook-retries")
+def list_webhook_retries(status: Optional[str] = None, limit: int = 100, db: Session = Depends(get_db)):
+    """List queued outbound webhook retries. Filter by status:
+    pending / in_flight / delivered / dead."""
+    q = db.query(WebhookRetry).order_by(WebhookRetry.next_attempt_at.asc(), WebhookRetry.id.desc())
+    if status:
+        q = q.filter(WebhookRetry.status == status.lower())
+    rows = q.limit(min(max(limit, 1), 500)).all()
+    return {
+        "count": len(rows),
+        "retries": [
+            {
+                "id": r.id,
+                "target_url": r.target_url,
+                "method": r.method,
+                "attempts": r.attempts,
+                "max_attempts": r.max_attempts,
+                "status": r.status,
+                "next_attempt_at": r.next_attempt_at.isoformat() if r.next_attempt_at else None,
+                "last_http_status": r.last_http_status,
+                "last_error": r.last_error,
+                "origin_signal_id": r.origin_signal_id,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+                "delivered_at": r.delivered_at.isoformat() if r.delivered_at else None,
+            }
+            for r in rows
+        ],
+    }
+
+
+@app.post("/api/webhook-retries/{retry_id}/retry-now")
+def retry_now(retry_id: int, db: Session = Depends(get_db)):
+    """Force a queued retry to fire on the next drain tick (bump
+    next_attempt_at to NOW, reset status → pending)."""
+    row = db.query(WebhookRetry).filter(WebhookRetry.id == retry_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="retry not found")
+    row.next_attempt_at = datetime.now(timezone.utc)
+    row.status = "pending"
+    row.last_error = None
+    db.commit(); db.refresh(row)
+    return {"ok": True, "id": row.id, "status": row.status, "next_attempt_at": row.next_attempt_at.isoformat()}
+
+
+@app.post("/api/webhook-retries/{retry_id}/kill")
+def kill_retry(retry_id: int, db: Session = Depends(get_db)):
+    """Give up on a retry — mark it dead so it stops trying. Useful when
+    you fixed the underlying config manually and don't want a stale
+    payload replayed later."""
+    row = db.query(WebhookRetry).filter(WebhookRetry.id == retry_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="retry not found")
+    row.status = "dead"
+    db.commit()
+    return {"ok": True, "id": row.id, "status": row.status}
+
+
+# Helper: enqueue a retry. Called by the executor when a broker webhook
+# POST fails. Uses exponential backoff: 30s · 2m · 8m · 30m · 2h.
+BACKOFF_SECONDS = [30, 120, 480, 1800, 7200]
+
+def enqueue_webhook_retry(db: Session, target_url: str, payload_str: str,
+                          headers: Optional[dict] = None, method: str = "POST",
+                          origin_signal_id: Optional[int] = None,
+                          initial_error: Optional[str] = None) -> int:
+    """Add a failed outbound webhook to the retry queue. Returns row id."""
+    row = WebhookRetry(
+        target_url=target_url,
+        method=method,
+        payload=payload_str,
+        headers=headers,
+        origin_signal_id=origin_signal_id,
+        attempts=0,
+        max_attempts=len(BACKOFF_SECONDS),
+        next_attempt_at=datetime.now(timezone.utc) + timedelta(seconds=BACKOFF_SECONDS[0]),
+        status="pending",
+        last_error=initial_error,
+    )
+    db.add(row); db.commit(); db.refresh(row)
+    return row.id
+
+
+# ----- Task #186: Observe webhook (log-only, no forwarding) ----------------
+# Companion endpoint for observe-mode accounts (PMT / TradersPost).
+# The user's TradingView alert keeps firing at PMT/TradersPost for execution
+# and ALSO fires a copy at this URL. We just log the payload — TradeCore
+# NEVER routes orders in observe mode. The observed stream powers journal,
+# analytics, rules checklist, rotation stats, live position display, and
+# timelines. See tradecore_pmt_observe_mode.md for the design lock.
+#
+# URL shape mirrors the demo endpoint so the frontend can build it the
+# same way in BrokerCredentialsModal.tradecoreWebhook(acctId):
+#     .../api/webhook/observe/{account_key}
+#
+# account_key = Account.id (preferred) or Account.name — either resolves.
+# If neither matches a real account, we still log (so misconfig is visible
+# in the events feed) but flag matched=false in the response.
+
+def _resolve_observe_account(db: Session, account_key: str):
+    """Look up an Account by id or name. Returns Account or None."""
+    if not account_key:
+        return None
+    # Try id first (numeric or string)
+    try:
+        acct = db.query(Account).filter(Account.id == int(account_key)).first()
+        if acct:
+            return acct
+    except (ValueError, TypeError):
+        pass
+    # Fall back to exact name match
+    return db.query(Account).filter(Account.name == account_key).first()
+
+
+@app.post("/api/webhook/observe/{account_key}")
+async def observe_webhook(account_key: str, request: Request, db: Session = Depends(get_db)):
+    """OBSERVE-ONLY sink. Logs the payload, NEVER routes to a broker.
+    Called from a second webhook on the user's TradingView alert while
+    the primary webhook stays wired to PMT / TradersPost for execution."""
+    if not account_key or len(account_key) < 1:
+        raise HTTPException(status_code=400, detail="account_key required")
+
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    raw_body = (await request.body()).decode("utf-8", "ignore") if not payload else json.dumps(payload)
+
+    # Pull the same fields we extract from other webhook shapes so the
+    # events feed reads consistently across observe / demo / direct.
+    event_type = str(
+        payload.get("event") or payload.get("action") or payload.get("data")
+        or payload.get("strategy_name") or "OBSERVE"
+    ).upper()
+    ticker = str(payload.get("ticker") or payload.get("symbol") or "?")
+    side = str(payload.get("side") or payload.get("direction") or payload.get("data") or "?")
+    try:
+        qty = int(payload.get("quantity") or payload.get("qty") or 0)
+    except (TypeError, ValueError):
+        qty = 0
+
+    acct = _resolve_observe_account(db, account_key)
+
+    row = WebhookSignal(
+        event=f"OBSERVE_{event_type}"[:60],
+        ticker=ticker[:40],
+        side=side[:20],
+        qty=qty,
+        key=f"observe:{account_key}"[:60],
+        raw_payload=raw_body,
+        trade_id=f"OBSERVE-{account_key}"[:80] if acct is None else f"OBSERVE-{acct.id}",
+    )
+    db.add(row); db.commit(); db.refresh(row)
+
+    return {
+        "accepted": True,
+        "mode": "observe",
+        "note": "OBSERVE-ONLY. No broker order was sent by TradeCore.",
+        "matched": acct is not None,
+        "account_id": acct.id if acct else None,
+        "account_name": acct.name if acct else None,
+        "event_id": row.id,
+        "event": event_type,
+        "ticker": ticker,
+        "side": side,
+        "qty": qty,
+        "logged_at": row.created_at.isoformat() if row.created_at else None,
+    }
+
+
+@app.get("/api/webhook/observe/{account_key}/events")
+def observe_webhook_events(account_key: str, limit: int = 50, db: Session = Depends(get_db)):
+    """Recent observe events for an account_key. Feeds the account card's
+    'last signal' timestamp and the observed-signals timeline."""
+    if not account_key:
+        raise HTTPException(status_code=400, detail="account_key required")
+    rows = (
+        db.query(WebhookSignal)
+        .filter(WebhookSignal.key == f"observe:{account_key}")
+        .order_by(WebhookSignal.id.desc())
+        .limit(min(limit, 200))
+        .all()
+    )
+    return {
+        "account_key": account_key,
+        "count": len(rows),
+        "last_signal_at": rows[0].created_at.isoformat() if rows and rows[0].created_at else None,
+        "events": [
+            {
+                "id": r.id,
+                "ts": r.created_at.isoformat() if r.created_at else None,
+                "event": r.event,
+                "ticker": r.ticker,
+                "side": r.side,
+                "qty": r.qty,
+                "raw_payload": r.raw_payload,
+            }
+            for r in rows
+        ],
+    }
+
+
+@app.delete("/api/webhook/observe/{account_key}/events")
+def observe_webhook_clear(account_key: str, db: Session = Depends(get_db)):
+    """Clear observed events for an account_key. Useful when re-testing
+    the wiring or handing an account off between users."""
+    if not account_key:
+        raise HTTPException(status_code=400, detail="account_key required")
+    n = db.query(WebhookSignal).filter(WebhookSignal.key == f"observe:{account_key}").delete()
+    db.commit()
+    return {"cleared": n, "account_key": account_key}
+
+
 @app.post("/api/webhook/strategy/{slug}")
 def webhook_by_strategy(slug: str, data: TradeEngineWebhook, db: Session = Depends(get_db)):
     """Task #119: strategy-scoped webhook URL. Each Strategy has its own
@@ -2996,6 +3356,161 @@ def delete_trade(tid: int, key: str = "", db: Session = Depends(get_db)):
     return {"deleted": True, "id": tid}
 
 
+# ----- Task #162: Trade Timeline -------------------------------------------
+
+@app.get("/api/trades/{tid}/timeline")
+def trade_timeline(tid: int, db: Session = Depends(get_db)):
+    """Per-trade lifecycle events merged + sorted. Answers 'what actually happened
+    in this trade?' — entry → PMT ack → TP hits → SL moves → close."""
+    import json as _json
+
+    p = db.query(Position).filter(Position.id == tid).first()
+    if not p:
+        raise HTTPException(status_code=404, detail="trade not found")
+
+    trade_id = p.trade_id
+    events = []
+
+    # (1) WebhookSignal events for this trade — entry, TP hits, close, etc.
+    signals = (
+        db.query(WebhookSignal)
+        .filter(WebhookSignal.trade_id == trade_id)
+        .order_by(WebhookSignal.created_at.asc())
+        .all()
+    )
+    for s in signals:
+        detail = ""
+        # Try to pull useful fields out of the raw payload
+        try:
+            payload = _json.loads(s.raw_payload) if s.raw_payload else {}
+        except Exception:
+            payload = {}
+
+        etype = (s.event or "").upper()
+        # Human labels + tones
+        LABELS = {
+            "ENTRY":         ("Entry filled",     "blue"),
+            "TP1":           ("TP1 hit",          "green"),
+            "TP2":           ("TP2 hit",          "green"),
+            "TP3":           ("TP3 hit",          "green"),
+            "STOP_HIT":      ("Stop hit",         "red"),
+            "STOP_UPDATE":   ("Stop update",      "amber"),
+            "MASTER_CLOSE":  ("Master close",     "red"),
+            "EMA_EXIT":      ("EMA exit",         "red"),
+            "CLOSE50":       ("Close 50%",        "amber"),
+            "CLOSE_FALLBACK":("Close (fallback)", "red"),
+            "ALL_TPS":       ("All TPs filled",   "green"),
+            "TEST":          ("Test webhook",     "muted"),
+        }
+        label, tone = LABELS.get(etype, (etype.title() or "Event", "muted"))
+
+        # Extract common fields from the payload
+        px = payload.get("entry_px") or payload.get("stop_px") or payload.get("close_qty_price")
+        qty = payload.get("close_qty") or payload.get("qty") or s.qty
+        if etype == "ENTRY":
+            e = payload.get("entry_px")
+            st = payload.get("stop_px")
+            parts = []
+            if e is not None: parts.append(f"@ {e}")
+            if s.qty: parts.append(f"{s.qty}ct")
+            if st is not None: parts.append(f"stop {st}")
+            detail = " · ".join(parts)
+        elif etype in ("TP1", "TP2", "TP3"):
+            cq = payload.get("close_qty")
+            rem = payload.get("remaining_qty")
+            parts = []
+            if cq: parts.append(f"banked {cq}ct")
+            if rem is not None: parts.append(f"remain {rem}ct")
+            detail = " · ".join(parts)
+        elif etype in ("STOP_HIT", "MASTER_CLOSE", "EMA_EXIT", "CLOSE_FALLBACK"):
+            cq = payload.get("close_qty")
+            parts = []
+            if cq: parts.append(f"closed {cq}ct")
+            detail = " · ".join(parts)
+        elif etype == "CLOSE50":
+            cq = payload.get("close_qty")
+            rem = payload.get("remaining_qty")
+            parts = []
+            if cq: parts.append(f"closed {cq}ct")
+            if rem is not None: parts.append(f"remain {rem}ct")
+            detail = " · ".join(parts)
+
+        events.append({
+            "ts": s.created_at.isoformat() if s.created_at else None,
+            "type": etype,
+            "label": label,
+            "tone": tone,
+            "detail": detail,
+            "source": "webhook",
+        })
+
+    # (2) StopUpdate rows for this trade — every SL move
+    stops = (
+        db.query(StopUpdate)
+        .filter(StopUpdate.trade_id == trade_id)
+        .order_by(StopUpdate.created_at.asc())
+        .all()
+    )
+    for u in stops:
+        # Skip the very first "initial" stop — matches ENTRY
+        label = "Stop moved"
+        src = (u.source or "").upper()
+        # Tone by source
+        tone = "amber"
+        if src.startswith("BE"):
+            label = "Stop → BE"
+            tone = "blue"
+        elif src.startswith("JUMP"):
+            label = f"Stop → {src}"
+            tone = "green"
+        elif src == "CREEP":
+            label = "Stop creep"
+            tone = "green"
+        elif src in ("SWING", "TICKS", "EMA+ATR"):
+            label = f"Trail ({src})"
+            tone = "amber"
+        elif src == "MASTER":
+            label = "Stop → Master"
+            tone = "red"
+        elif src == "RESYNC":
+            label = "Stop resync"
+            tone = "muted"
+
+        detail_parts = []
+        if u.old_stop is not None and u.new_stop is not None:
+            detail_parts.append(f"{u.old_stop:g} → {u.new_stop:g}")
+        elif u.new_stop is not None:
+            detail_parts.append(f"→ {u.new_stop:g}")
+        detail = " · ".join(detail_parts)
+
+        events.append({
+            "ts": u.created_at.isoformat() if u.created_at else None,
+            "type": "STOP_UPDATE",
+            "label": label,
+            "tone": tone,
+            "detail": detail,
+            "source": u.source or "STOP",
+        })
+
+    # (3) Sort merged events chronologically. Fall back to zero-string for unknown.
+    events.sort(key=lambda e: e["ts"] or "")
+
+    return {
+        "trade_id": trade_id,
+        "symbol": p.ticker,
+        "side": p.side,
+        "qty_total": p.qty_total,
+        "qty_open": p.qty_open,
+        "entry_price": p.entry_price,
+        "current_stop": p.stop_price,
+        "status": p.status,
+        "exit_reason": p.exit_reason,
+        "entry_time": p.entry_time.isoformat() if p.entry_time else None,
+        "exit_time": p.exit_time.isoformat() if p.exit_time else None,
+        "events": events,
+    }
+
+
 # ----- Analytics -----------------------------------------------------------
 
 @app.get("/api/analytics")
@@ -3015,7 +3530,9 @@ def analytics(account_id: Optional[int] = None, db: Session = Depends(get_db)):
                 "equity_curve": [], "session_breakdown": {},
                 "sharpe": 0, "sortino": 0, "calmar": 0, "kelly_pct": 0,
                 "max_drawdown": 0, "current_streak": 0, "longest_win_streak": 0,
-                "longest_loss_streak": 0}
+                "longest_loss_streak": 0,
+                "today_pnl": 0, "today_wins": 0, "today_losses": 0, "today_win_rate": 0,
+                "week_pnl": 0, "week_wins": 0, "week_losses": 0, "week_win_rate": 0}
 
     wins = [p for p in rows if (p.realized_pnl or 0) > 0]
     losses = [p for p in rows if (p.realized_pnl or 0) < 0]
@@ -3093,6 +3610,27 @@ def analytics(account_id: Optional[int] = None, db: Session = Depends(get_db)):
     elif last_verdict == "L":
         current_streak = -loss_streak     # negative = loss streak
 
+    # Task #159: today + week cuts for the ops panel
+    # Uses UTC boundary — matches midnight_reset_loop() convention.
+    now_utc = datetime.now(timezone.utc)
+    today_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_start = today_start - timedelta(days=now_utc.weekday())  # Monday 00:00 UTC
+    def _bucket(rows_):
+        pnl = sum(r.realized_pnl or 0 for r in rows_)
+        w = sum(1 for r in rows_ if (r.realized_pnl or 0) > 0)
+        l = sum(1 for r in rows_ if (r.realized_pnl or 0) < 0)
+        rate = round(w / (w + l) * 100, 2) if (w + l) else 0
+        return pnl, w, l, rate
+    today_rows = [r for r in rows if r.exit_time and r.exit_time >= today_start]
+    week_rows = [r for r in rows if r.exit_time and r.exit_time >= week_start]
+    # Fallback to created_at when exit_time is missing (legacy rows)
+    if not today_rows:
+        today_rows = [r for r in rows if r.created_at and r.created_at >= today_start]
+    if not week_rows:
+        week_rows = [r for r in rows if r.created_at and r.created_at >= week_start]
+    today_pnl, today_w, today_l, today_rate = _bucket(today_rows)
+    week_pnl, week_w, week_l, week_rate = _bucket(week_rows)
+
     return {
         "total_trades": total,
         "win_rate": round(win_rate, 2),
@@ -3113,6 +3651,129 @@ def analytics(account_id: Optional[int] = None, db: Session = Depends(get_db)):
         "current_streak": current_streak,
         "longest_win_streak": longest_win_streak,
         "longest_loss_streak": longest_loss_streak,
+        # Task #159 — today + week cuts for the ops panel
+        "today_pnl": round(today_pnl, 2),
+        "today_wins": today_w,
+        "today_losses": today_l,
+        "today_win_rate": today_rate,
+        "week_pnl": round(week_pnl, 2),
+        "week_wins": week_w,
+        "week_losses": week_l,
+        "week_win_rate": week_rate,
+    }
+
+
+# ----- Task #174: Monthly P&L pivot (Lucid-style stats) --------------------
+
+@app.get("/api/analytics/monthly")
+def analytics_monthly(
+    group_by: str = "strategy",         # strategy | asset | account | session
+    db: Session = Depends(get_db),
+):
+    """Pivot matrix: rows = groups (strategies / assets / accounts / sessions),
+    cols = months. Each cell has $ pnl + wins + losses + win rate. Also returns
+    per-month column totals and grand totals. Feeds the Stats page (Lucid-style)."""
+    if group_by not in {"strategy", "asset", "account", "session"}:
+        raise HTTPException(
+            status_code=400,
+            detail=f"group_by must be one of strategy|asset|account|session, got {group_by!r}",
+        )
+
+    rows = (
+        db.query(Position)
+        .filter(Position.status == "CLOSED")
+        .filter(Position.realized_pnl.isnot(None))
+        .order_by(Position.exit_time.asc().nulls_last(), Position.created_at.asc())
+        .all()
+    )
+    if not rows:
+        return {"group_by": group_by, "periods": [], "groups": [], "totals_by_month": {}, "grand_total": {"pnl": 0, "wins": 0, "losses": 0, "trades": 0, "win_rate": 0}}
+
+    # Resolve label lookups so keys are human-readable
+    strat_names = {s.id: s.name for s in db.query(Strategy).all()}
+    acct_names = {a.id: a.name for a in db.query(Account).all()}
+
+    def key_and_label(p: Position) -> tuple[str, str]:
+        if group_by == "strategy":
+            sid = p.strategy_id
+            if not sid:
+                return ("unassigned", "Unassigned")
+            return (f"strategy_{sid}", strat_names.get(sid, f"Strategy #{sid}"))
+        if group_by == "asset":
+            t = p.ticker or "?"
+            # Normalize the futures continuation contract suffix
+            for stem in ("MNQ", "NQ", "MES", "ES", "M2K", "RTY", "MYM", "YM", "MGC", "GC", "CL", "MNG", "NG", "6E"):
+                if t.upper().startswith(stem):
+                    return (stem, stem)
+            return (t, t)
+        if group_by == "account":
+            aid = p.account_id
+            if not aid:
+                return ("unassigned", "Unassigned")
+            return (f"account_{aid}", acct_names.get(aid, f"Account #{aid}"))
+        # session
+        return (p.session or "unknown", (p.session or "unknown").replace("_", " ").title())
+
+    # Bucket into (group_key, month) → aggregate
+    def month_of(p: Position) -> str:
+        d = p.exit_time or p.created_at
+        return d.strftime("%Y-%m") if d else "unknown"
+
+    periods_set = set()
+    groups: dict[str, dict] = {}   # {key: {label, months: {"YYYY-MM": {pnl, wins, losses, trades}}}}
+    totals_by_month: dict[str, dict] = {}
+
+    for p in rows:
+        gk, gl = key_and_label(p)
+        m = month_of(p)
+        periods_set.add(m)
+
+        g = groups.setdefault(gk, {"key": gk, "label": gl, "months": {}, "totals": {"pnl": 0.0, "wins": 0, "losses": 0, "trades": 0}})
+        cell = g["months"].setdefault(m, {"pnl": 0.0, "wins": 0, "losses": 0, "trades": 0})
+        col = totals_by_month.setdefault(m, {"pnl": 0.0, "wins": 0, "losses": 0, "trades": 0})
+
+        pnl = p.realized_pnl or 0.0
+        w = 1 if pnl > 0 else 0
+        l = 1 if pnl < 0 else 0
+
+        for bucket in (cell, g["totals"], col):
+            bucket["pnl"] += pnl
+            bucket["wins"] += w
+            bucket["losses"] += l
+            bucket["trades"] += 1
+
+    # Compute win_rate everywhere
+    def add_rate(d: dict) -> dict:
+        wl = d["wins"] + d["losses"]
+        d["win_rate"] = round(d["wins"] / wl * 100, 1) if wl else 0
+        d["pnl"] = round(d["pnl"], 2)
+        return d
+
+    for g in groups.values():
+        for m in g["months"].values():
+            add_rate(m)
+        add_rate(g["totals"])
+    for m in totals_by_month.values():
+        add_rate(m)
+
+    grand = {"pnl": 0.0, "wins": 0, "losses": 0, "trades": 0}
+    for m in totals_by_month.values():
+        grand["pnl"] += m["pnl"]
+        grand["wins"] += m["wins"]
+        grand["losses"] += m["losses"]
+        grand["trades"] += m["trades"]
+    add_rate(grand)
+
+    periods = sorted(periods_set)
+    # Sort groups by total pnl descending — biggest earners first
+    groups_out = sorted(groups.values(), key=lambda g: g["totals"]["pnl"], reverse=True)
+
+    return {
+        "group_by": group_by,
+        "periods": periods,
+        "groups": groups_out,
+        "totals_by_month": totals_by_month,
+        "grand_total": grand,
     }
 
 
@@ -3168,6 +3829,44 @@ def trades_csv(account_id: Optional[int] = None, db: Session = Depends(get_db)):
         media_type="text/csv",
         headers={"Content-Disposition": f"attachment; filename=trades_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.csv"},
     )
+
+
+# ----- Task #173: Trade Journal — bulk clear/reset -------------------------
+
+@app.delete("/api/trades")
+def clear_trades(
+    scope: str = "closed_only",           # "closed_only" | "all"
+    account_id: Optional[int] = None,     # optional per-account scope
+    before_date: Optional[str] = None,    # ISO date, deletes exit_time <= this
+    key: str = "",
+    db: Session = Depends(get_db),
+):
+    """Bulk-delete positions from the journal. Frontend enforces export-first +
+    typed-confirm before hitting this. Server-side safety: NEVER touches OPEN
+    positions unless scope=='all' is explicitly requested."""
+    _admin_check(key)
+
+    q = db.query(Position)
+    if scope == "closed_only":
+        # Only fully closed trades — never touch a live one from here
+        q = q.filter(Position.status.in_(["CLOSED", "CANCELLED"]))
+    elif scope != "all":
+        raise HTTPException(status_code=400, detail=f"scope must be 'closed_only' or 'all', got {scope!r}")
+
+    if account_id:
+        q = q.filter(Position.account_id == account_id)
+
+    if before_date:
+        try:
+            cutoff = datetime.fromisoformat(before_date.replace("Z", "+00:00"))
+            q = q.filter(Position.exit_time.isnot(None), Position.exit_time <= cutoff)
+        except Exception:
+            raise HTTPException(status_code=400, detail=f"before_date must be ISO 8601, got {before_date!r}")
+
+    count = q.count()
+    q.delete(synchronize_session=False)
+    db.commit()
+    return {"deleted": count, "scope": scope, "account_id": account_id, "before_date": before_date}
 
 
 # ----- File upload (trade screenshots) -------------------------------------

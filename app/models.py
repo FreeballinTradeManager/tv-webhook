@@ -516,3 +516,45 @@ class UserSettings(Base):
         onupdate=func.now(),
         nullable=False,
     )
+
+
+# ---------------------------------------------------------------------------
+# Task #134 — Webhook retry queue.
+# When an outbound broker webhook fails (network, 5xx, timeout), we queue
+# the payload here with an exponential backoff (30s → 2m → 8m → 30m → 2h).
+# A background task drains it. Failed rows past max_attempts stay in the
+# table with status="dead" so we can inspect them in the logs UI.
+# ---------------------------------------------------------------------------
+
+RETRY_STATES = ("pending", "in_flight", "delivered", "dead")
+
+
+class WebhookRetry(Base):
+    __tablename__ = "webhook_retries"
+
+    id = Column(Integer, primary_key=True, index=True)
+    # Where we're trying to deliver.
+    target_url = Column(String, nullable=False)
+    method = Column(String, nullable=False, default="POST")
+    payload = Column(Text, nullable=False)             # JSON string body
+    headers = Column(JSON, nullable=True)              # optional auth headers
+    # Which incoming signal triggered this outbound send. Lets the logs
+    # view thread inbound → outbound so failures can be traced.
+    origin_signal_id = Column(Integer, nullable=True, index=True)
+
+    attempts = Column(Integer, nullable=False, default=0)
+    max_attempts = Column(Integer, nullable=False, default=5)
+    next_attempt_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    status = Column(String, nullable=False, default="pending", index=True)
+    last_error = Column(Text, nullable=True)
+    last_http_status = Column(Integer, nullable=True)
+    delivered_at = Column(DateTime(timezone=True), nullable=True)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )

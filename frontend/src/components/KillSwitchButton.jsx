@@ -7,6 +7,8 @@ import {
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { AlertTriangle, PowerOff, ShieldCheck } from 'lucide-react';
+import { notify } from '@/lib/notify';
+import { audit, AUDIT_EVENTS } from '@/lib/audit_log';
 
 // Task #43 — global kill switch button. Sits in Dashboard header.
 // When ON — rejects every entry across every account.
@@ -33,8 +35,16 @@ export default function KillSwitchButton() {
       const res = await KillSwitch.set(true, reason || 'emergency', flattenAll);
       setStatus(res);
       setConfirmOn(false);
-      if (res.flattened?.positions_flattened) {
-        alert(`🛑 Kill Switch ENGAGED\n\nFlattened ${res.flattened.positions_flattened} positions across ${res.flattened.accounts_touched} accounts.`);
+      const flat = res.flattened;
+      audit(AUDIT_EVENTS.KILL_SWITCH_FIRE, { reason: reason || 'emergency', flattenAll, flattened: flat });
+      notify('emergency_close', {
+        title: 'Kill Switch ENGAGED',
+        body: flat?.positions_flattened
+          ? `Flattened ${flat.positions_flattened} positions across ${flat.accounts_touched} accounts. Reason: ${reason || 'emergency'}.`
+          : `Reason: ${reason || 'emergency'}. New entries blocked across every account.`,
+      });
+      if (flat?.positions_flattened) {
+        alert(`🛑 Kill Switch ENGAGED\n\nFlattened ${flat.positions_flattened} positions across ${flat.accounts_touched} accounts.`);
       }
     } catch (e) {
       alert(`Failed to engage kill switch: ${e.message}`);
@@ -46,6 +56,7 @@ export default function KillSwitchButton() {
       const res = await KillSwitch.set(false);
       setStatus(res);
       setConfirmOff(false);
+      audit(AUDIT_EVENTS.KILL_SWITCH_RELEASE, {});
     } catch (e) {
       alert(`Failed to release kill switch: ${e.message}`);
     }
@@ -126,6 +137,11 @@ export default function KillSwitchButton() {
               <Label htmlFor="flatten" className="text-slate-300 cursor-pointer text-sm">
                 Also FLATTEN all currently open positions (recommended)
               </Label>
+            </div>
+            <div className="text-xs text-slate-400 bg-slate-900/60 border border-slate-700 rounded-md px-2.5 py-2 leading-relaxed">
+              <span className="text-white font-semibold">Observe-mode accounts</span> (PMT / TradersPost) get locked so we
+              reject any incoming signals into your journal — but TradeCore can't flatten their live broker positions.
+              For those, also hit flatten in your primary broker's UI.
             </div>
           </div>
           <DialogFooter>
