@@ -3,7 +3,7 @@ import { Account } from "@/entities/all";
 import { api } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Plus, Trash2, Edit, Shield, ShieldAlert, Unlock, Zap, CheckCircle2, ExternalLink, Radio, Building2, Copy, Pause, Play } from "lucide-react";
+import { Plus, Trash2, Edit, Shield, ShieldAlert, ShieldCheck, Unlock, Zap, CheckCircle2, ExternalLink, Radio, Building2, Copy, Pause, Play } from "lucide-react";
 import { feedHealth, relativeAge } from "@/lib/connection_health";
 import { PROP_FIRMS, firmByKey, guardrailsFor, firmSummary } from "@/lib/prop_firms";
 import { useContextMenu } from "@/components/RightClickMenu";
@@ -509,6 +509,10 @@ function AccountCard({ acc, onEdit, onDelete, onResetGuardian, onTogglePause, on
                         <Building2 className="w-2.5 h-2.5"/>{firmByKey(acc.firm).name}
                       </div>
                       <div className="text-[10px] text-slate-500">{firmSummary(acc)}</div>
+                      <a href={`/Playbook?firm=${encodeURIComponent(firmByKey(acc.firm).name)}#rule-profiles`}
+                         className="inline-flex items-center gap-1 mt-1 text-[10px] font-semibold uppercase tracking-wide text-blue-400 hover:text-blue-300 hover:underline">
+                        <ShieldCheck className="w-2.5 h-2.5"/>Rule Profile
+                      </a>
                     </div>
                   )}
                   {(() => {

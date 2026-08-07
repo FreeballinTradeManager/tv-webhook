@@ -12,6 +12,7 @@ import {
 import { firmByKey, PROP_FIRMS } from "@/lib/prop_firms";
 import { assetStatus, upcomingHolidays, ASSET_HOURS } from "@/lib/market_hours";
 import PayoutPlanner from "@/components/PayoutPlanner";
+import RuleProfilesCard from "@/components/RuleProfilesCard";
 import { audit, AUDIT_EVENTS } from "@/lib/audit_log";
 
 // Task #76 + #60 + #131 + #138 — Rules & Playbook.
@@ -166,6 +167,9 @@ export default function PlaybookPage() {
 
         {/* Task #192 — Payout planner (daily target math) */}
         <PayoutPlanner trades={trades}/>
+
+        {/* Rule Profiles — save Lucid 25k / Apex 50k / MFFU rules once, reuse everywhere */}
+        <RuleProfilesCard/>
 
         {/* Payout schedule per firm (task #138) */}
         <PayoutScheduleCard accounts={accounts}/>

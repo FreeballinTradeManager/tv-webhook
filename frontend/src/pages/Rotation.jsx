@@ -15,6 +15,7 @@ import {
   Copy, Pencil, Power,
 } from "lucide-react";
 import { useContextMenu } from "@/components/RightClickMenu";
+import AccountGroupsCard from "@/components/AccountGroupsCard";
 
 // Preset time windows for common sessions.
 // Locked Pine palette — no pink, no washed-out 15%-opacity backgrounds.
@@ -480,6 +481,9 @@ export default function RotationPage() {
             <Plus className="w-4 h-4 mr-2"/>New Group
           </Button>
         </div>
+
+        {/* Custom rotation config per group — Rule Profile · Time Masters · Cascade order */}
+        <AccountGroupsCard/>
 
         {/* Cascade chains overview */}
         {rootGroups.length > 0 && groups.length > 1 && (
