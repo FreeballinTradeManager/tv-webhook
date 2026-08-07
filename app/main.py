@@ -2258,19 +2258,49 @@ def webhook(data: TradeEngineWebhook, db: Session = Depends(get_db)):
         # Only fan out to members whose account is in the "active" rotation
         # state. benched/cooled/stopped accounts are skipped — they get
         # promoted to active automatically when someone else rotates out.
-        members = [
-            m for m in group_obj.members
-            if m.active
-            and m.account
-            and m.account.active
-            and not m.account.paused
+        #
+        # Profit-target rotation (uses Group.rotate_after_profit): if a
+        # group has a $ target set, any account whose pnl_today already
+        # meets or exceeds it gets skipped for this signal. Matches the
+        # frontend Rule Profile pickCurrentAccount() logic.
+        target = float(group_obj.rotate_after_profit or 0)
+        def _hit_target(a):
+            return target > 0 and float(a.pnl_today or 0) >= target
+
+        eligible_state = lambda m: (
+            m.active and m.account and m.account.active and not m.account.paused
             and (m.account.state or "active") == "active"
-        ]
-        if not members:
+        )
+        all_active = [m for m in group_obj.members if eligible_state(m)]
+        members = [m for m in all_active if not _hit_target(m.account)]
+        skipped_target = [m for m in all_active if _hit_target(m.account)]
+
+        if not members and not all_active:
             raise HTTPException(
                 status_code=400,
                 detail=f"group '{data.group}' has no active members (cascade tried: {' → '.join(cascade_chain)})",
             )
+        if not members and skipped_target:
+            # Every active account already hit the target for the day.
+            # Rather than error, cascade to the next group if one exists.
+            if group_obj.next_group_id:
+                nxt = db.query(Group).filter(Group.id == group_obj.next_group_id).first()
+                if nxt and nxt.id not in seen_ids:
+                    seen_ids.add(nxt.id)
+                    cascade_chain.append(nxt.name + " (target-cascade)")
+                    group_obj = nxt
+                    members = [
+                        m for m in group_obj.members
+                        if eligible_state(m) and not _hit_target(m.account)
+                    ]
+            if not members:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"group '{data.group}' — every active account hit the profit target "
+                        f"(${target:,.0f}); cascade tried: {' → '.join(cascade_chain)}"
+                    ),
+                )
 
         leg_results: list[dict] = []
         base_trade_id = data.trade_id
