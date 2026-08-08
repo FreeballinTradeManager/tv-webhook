@@ -2033,6 +2033,25 @@ async def observe_webhook(account_key: str, request: Request, db: Session = Depe
     )
     db.add(row); db.commit(); db.refresh(row)
 
+    # Bridge: turn the observed signal into a Position row so /api/trades
+    # (Dashboard, Trades table, Analytics) auto-populate. Observe never
+    # touches a broker — this is purely mirroring what PMT already did.
+    position_action = None
+    position_id = None
+    try:
+        pos, position_action = _observe_sync_position(
+            db, acct=acct, event_type=event_type, payload=payload,
+            ticker=ticker, side=side, qty=qty,
+        )
+        if pos is not None:
+            db.commit()
+            position_id = pos.id
+    except Exception as e:
+        # Bridge failure never blocks the observe ACK — signal log still
+        # captures the raw payload. We surface the error in the response.
+        db.rollback()
+        position_action = f"error: {type(e).__name__}: {e}"
+
     return {
         "accepted": True,
         "mode": "observe",
@@ -2045,8 +2064,107 @@ async def observe_webhook(account_key: str, request: Request, db: Session = Depe
         "ticker": ticker,
         "side": side,
         "qty": qty,
+        "position_action": position_action,   # "opened" / "closed" / "skip" / "error: ..."
+        "position_id": position_id,
         "logged_at": row.created_at.isoformat() if row.created_at else None,
     }
+
+
+# ---------------------------------------------------------------------------
+# OBSERVE → Position bridge
+# ---------------------------------------------------------------------------
+# Turns "entry" / "close" observe signals into Position rows so the
+# Trades / Dashboard views auto-populate. Never sends orders — the
+# broker is untouched. Idempotent by (account, ticker, status=open).
+#
+# Event families we recognize:
+#   ENTRY-like:  BUY / SELL / ENTRY / buy / sell
+#   CLOSE-like:  CLOSE / EXIT / STOP_HIT / EMA_EXIT / ALL_TPS_FILLED /
+#                MASTER_CLOSE / CLOSE_FALLBACK / TP3 (last TP = position flat)
+#   SKIP:        TPn (partial), STOP_UPDATE, SL update — no Position change
+
+def _observe_sync_position(db, acct, event_type, payload, ticker, side, qty):
+    """Returns (Position or None, action_str)."""
+    if acct is None:
+        return None, "skip (no matched account)"
+
+    ev = (event_type or "").upper()
+    entry_like = ev in {"BUY", "SELL", "ENTRY"}
+    close_like = ev in {
+        "CLOSE", "EXIT", "STOP_HIT", "EMA_EXIT",
+        "ALL_TPS_FILLED", "MASTER_CLOSE", "CLOSE_FALLBACK",
+    }
+    # Some pine indicators send TP hits with the event field literally "TP3"
+    # — final TP = position flat. TP1/TP2 are partials, we don't close.
+    if ev == "TP3":
+        close_like = True
+
+    # Find any open position for this account+ticker. Symbols like
+    # "MNQ1!" and "MNQ" should match — normalize both sides.
+    def _norm(s):
+        return (s or "").replace("1!", "").upper()
+    ticker_norm = _norm(ticker)
+
+    open_row = (
+        db.query(Position)
+        .filter(Position.account_id == acct.id, Position.status == "open")
+        .filter(sa_func.upper(sa_func.replace(Position.ticker, "1!", "")) == ticker_norm)
+        .order_by(Position.id.desc())
+        .first()
+    )
+
+    # ENTRY: only create if no open position already exists for this
+    # account+ticker (avoid dupes on retries).
+    if entry_like:
+        if open_row is not None:
+            return open_row, "skip (already open)"
+        pine_side = "LONG" if side.lower() in ("buy", "long") else "SHORT" if side.lower() in ("sell", "short") else side.upper()
+        entry_px = _to_float(payload.get("price") or payload.get("entry_px"))
+        stop_px  = _to_float(payload.get("sl") or payload.get("stop_px"))
+        pos = Position(
+            trade_id=f"OBSERVE-{acct.id}-{int(datetime.utcnow().timestamp()*1000)}",
+            ticker=ticker or "?",
+            side=pine_side,
+            qty_total=max(1, qty or 1),
+            qty_open=max(1, qty or 1),
+            entry_price=entry_px,
+            stop_price=stop_px,
+            status="open",
+            account_id=acct.id,
+            broker="observed",
+            tp1_px=_to_float(payload.get("tp1_px")),
+            tp2_px=_to_float(payload.get("tp2_px")),
+            tp3_px=_to_float(payload.get("tp3_px")),
+            direction=pine_side.lower(),
+            entry_time=datetime.utcnow(),
+        )
+        db.add(pos)
+        db.flush()
+        return pos, "opened"
+
+    # CLOSE: mark the open row as closed. If we have exit price / PnL in
+    # the payload, capture it — otherwise leave for broker reconciliation.
+    if close_like and open_row is not None:
+        open_row.status = "closed"
+        open_row.qty_open = 0
+        open_row.exit_reason = ev.lower()
+        open_row.exit_time = datetime.utcnow()
+        exit_px = _to_float(payload.get("exit_price") or payload.get("close_px") or payload.get("price"))
+        realized = _to_float(payload.get("realized_pnl") or payload.get("pnl"))
+        if realized is not None:
+            open_row.realized_pnl = realized
+        return open_row, "closed"
+
+    return None, "skip (not entry/close)"
+
+
+def _to_float(v):
+    if v is None or v == "":
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
 
 
 @app.get("/api/webhook/observe/{account_key}/events")
