@@ -29,7 +29,8 @@ import {
   Eye,
   CreditCard,
   FileBarChart,
-  Radio
+  Radio,
+  Zap
 } from "lucide-react";
 import {
   Sidebar,
@@ -79,6 +80,7 @@ const navigationItems = [
   { title: "Trading Schedule",url: createPageUrl("TradingSchedule"), icon: Activity,        group: "Tools" },
   { title: "Asset Registry",  url: createPageUrl("AssetRegistry"),   icon: FileCode,        group: "Tools" },
   { title: "Chart Drawings",  url: createPageUrl("ChartDrawings"),   icon: NotebookPen,     group: "Tools" },
+  { title: "Manual Signal",   url: createPageUrl("ManualSignal"),    icon: Zap,             group: "Tools" },
 
   // ── SETUP ──────────────────────────────────────────────────────
   { title: "Setup Wizard",    url: createPageUrl("Setup"),           icon: Sparkles,        group: "Setup" },

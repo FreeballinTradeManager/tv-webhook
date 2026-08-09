@@ -31,6 +31,7 @@ import ConnectPMT from './pages/ConnectPMT'
 import AssetRegistry from './pages/AssetRegistry'
 import TradingSchedule from './pages/TradingSchedule'
 import ChartDrawings from './pages/ChartDrawings'
+import ManualSignal from './pages/ManualSignal'
 import DailyJournal from './pages/DailyJournal'
 import SignIn, { isAuthed } from './pages/SignIn'
 
@@ -117,6 +118,8 @@ export default function App() {
                 <Route path="/Schedule"         element={<TradingSchedule />} />
                 <Route path="/ChartDrawings"    element={<ChartDrawings />} />
                 <Route path="/Drawings"         element={<ChartDrawings />} />
+                <Route path="/ManualSignal"     element={<ManualSignal />} />
+                <Route path="/TestSignal"       element={<ManualSignal />} />
                 <Route path="*" element={<PageNotFound />} />
               </Routes>
             </Layout>
