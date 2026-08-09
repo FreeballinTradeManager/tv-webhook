@@ -3,6 +3,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Package, DollarSign, TrendingUp } from "lucide-react";
 import { ASSET_REGISTRY } from "@/lib/asset_registry";
+import SymbolMapGlobal from "@/components/SymbolMapGlobal";
 
 // AssetRegistry — quick-reference table for every futures contract the
 // asset_registry lib knows about. Tick size, point value, day margin,
@@ -73,6 +74,8 @@ export default function AssetRegistryPage() {
             </div>
           </CardContent>
         </Card>
+
+        <SymbolMapGlobal/>
 
         <div className="text-xs text-slate-500">
           Source: <code className="text-blue-400">lib/asset_registry.js</code>. Used by lot-sizing, risk calculator, and normalization.

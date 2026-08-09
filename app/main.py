@@ -4664,6 +4664,43 @@ def modify_position(pid: int, data: PositionModify, key: str = "",
     }
 
 
+# ---------------------------------------------------------------------------
+# Server-managed protective stop (Task #67)
+# ---------------------------------------------------------------------------
+# When Pine emits an ENTRY signal it includes the stop_px. The bridge already
+# stores it on Position.stop_price. This endpoint lets an out-of-band client
+# (a reconciliation worker, a manual override) POST an updated protective
+# stop that TradeCore remembers even if the Pine indicator disconnects mid-
+# trade. Purely a record — TradeCore does not route orders in observe mode.
+@app.post("/api/positions/{pid}/protective-stop")
+def set_protective_stop(pid: int, key: str = "",
+                        stop_price: float = 0.0,
+                        source: str = "manual",
+                        db: Session = Depends(get_db)):
+    """Record a protective stop for a position. Idempotent; overwrites
+    stop_price + stop_source. Never sends broker orders."""
+    _admin_check(key)
+    p = db.query(Position).filter(Position.id == pid).first()
+    if not p:
+        raise HTTPException(status_code=404, detail="position not found")
+    if (p.status or "").upper() in ("CLOSED", "CANCELLED"):
+        raise HTTPException(status_code=400, detail=f"position already {p.status} — cannot set stop")
+    if stop_price <= 0:
+        raise HTTPException(status_code=400, detail="stop_price must be > 0")
+    old = p.stop_price
+    p.stop_price = float(stop_price)
+    p.stop_source = f"backup:{source}"[:60]
+    db.commit(); db.refresh(p)
+    return {
+        "position_id": p.id,
+        "ticker": p.ticker,
+        "old_stop": old,
+        "new_stop": p.stop_price,
+        "source": p.stop_source,
+        "note": "OBSERVE-MODE. TradeCore recorded the level; no broker order was placed.",
+    }
+
+
 @app.post("/api/positions/{pid}/close")
 def close_position_manual(pid: int, data: PositionClose, key: str = "",
                           db: Session = Depends(get_db)):
