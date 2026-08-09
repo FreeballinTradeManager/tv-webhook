@@ -9,6 +9,7 @@ import { Account } from "@/entities/all";
 import { api } from "@/lib/api";
 import { getGroupConfig, setGroupConfig, moveInCascade, defaultCascadeFrom, currentMasterFor, pickCurrentAccount, accountHitTarget } from "@/lib/group_config";
 import { loadProfiles } from "@/lib/rule_profiles";
+import { seedBusinessGroupConfig } from "@/lib/seed_business_group";
 
 // AccountGroupsCard — customizable per-group rotation config.
 // Rule Profile · Time Masters · Cascade order · Uses per account
@@ -50,11 +51,50 @@ export default function AccountGroupsCard() {
     );
   }
 
+  // Find a group named "Business" so the one-click seed can attach to it.
+  const businessGroup = groups.find(g => g.name?.toLowerCase() === "business");
+  const businessMembers = accounts.filter(a =>
+    (a.group_id === businessGroup?.id) || (a.group === businessGroup?.name)
+  );
+  const canSeedBusiness = businessGroup && businessMembers.length >= 2;
+
+  const doSeedBusiness = () => {
+    if (!businessGroup) {
+      alert("Create a group named 'Business' first (New Group button above), attach 5 accounts, then click Seed Business.");
+      return;
+    }
+    if (businessMembers.length < 2) {
+      alert(`Business group needs at least 2 accounts to seed masters. Currently has ${businessMembers.length}. Add accounts on the Rotation page first.`);
+      return;
+    }
+    const memberIds = businessMembers.map(a => a.id);
+    seedBusinessGroupConfig(businessGroup.id, memberIds);
+    alert(
+      `Seeded Business group config:\n` +
+      `  · ${businessMembers[0]?.name} = master 18:00–01:00 ET\n` +
+      (businessMembers[1] ? `  · ${businessMembers[1].name} = master 11:45–15:00 ET\n` : "") +
+      (businessMembers.slice(2).length > 0
+        ? `  · Cascade: ${businessMembers.slice(2).map(a => a.name).join(" → ")}\n`
+        : "") +
+      `\nAttach a Rule Profile below to enforce profit-target rotation.`
+    );
+    window.location.reload();
+  };
+
   return (
     <Card className="bg-slate-900 border-slate-800">
       <CardHeader>
-        <CardTitle className="text-white flex items-center gap-2">
-          <Users className="w-5 h-5 text-blue-400"/>Account Groups — Custom Rotation
+        <CardTitle className="text-white flex items-center justify-between gap-2">
+          <span className="flex items-center gap-2">
+            <Users className="w-5 h-5 text-blue-400"/>Account Groups — Custom Rotation
+          </span>
+          <Button size="sm" variant="outline" onClick={doSeedBusiness}
+                  className={canSeedBusiness ? "text-emerald-300 border-emerald-500/40 hover:bg-emerald-950/30" : "text-slate-500"}
+                  title={canSeedBusiness
+                    ? "Seed acct 1 = 18:00–01:00 master, acct 2 = 11:45–15:00 master, rest cascade"
+                    : "Create a group named 'Business' with ≥2 accounts first"}>
+            Seed Business
+          </Button>
         </CardTitle>
         <p className="text-xs text-slate-400 mt-1">
           Attach a saved Rule Profile per group. Set time-based masters (e.g. Business: acct 1 master 18:00–01:00, acct 2 master 11:45–15:00). Reorder cascade. Cap uses per account before rotating.
