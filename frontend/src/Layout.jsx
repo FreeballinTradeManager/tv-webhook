@@ -78,6 +78,7 @@ const navigationItems = [
   { title: "Signal Log",      url: createPageUrl("Logs"),            icon: Terminal,        group: "Tools" },
   { title: "Trading Schedule",url: createPageUrl("TradingSchedule"), icon: Activity,        group: "Tools" },
   { title: "Asset Registry",  url: createPageUrl("AssetRegistry"),   icon: FileCode,        group: "Tools" },
+  { title: "Chart Drawings",  url: createPageUrl("ChartDrawings"),   icon: NotebookPen,     group: "Tools" },
 
   // ── SETUP ──────────────────────────────────────────────────────
   { title: "Setup Wizard",    url: createPageUrl("Setup"),           icon: Sparkles,        group: "Setup" },

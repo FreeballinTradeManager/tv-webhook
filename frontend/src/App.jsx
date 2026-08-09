@@ -30,6 +30,7 @@ import PropFirmOnboarding from './pages/PropFirmOnboarding'
 import ConnectPMT from './pages/ConnectPMT'
 import AssetRegistry from './pages/AssetRegistry'
 import TradingSchedule from './pages/TradingSchedule'
+import ChartDrawings from './pages/ChartDrawings'
 import DailyJournal from './pages/DailyJournal'
 import SignIn, { isAuthed } from './pages/SignIn'
 
@@ -114,6 +115,8 @@ export default function App() {
                 <Route path="/Assets"           element={<AssetRegistry />} />
                 <Route path="/TradingSchedule"  element={<TradingSchedule />} />
                 <Route path="/Schedule"         element={<TradingSchedule />} />
+                <Route path="/ChartDrawings"    element={<ChartDrawings />} />
+                <Route path="/Drawings"         element={<ChartDrawings />} />
                 <Route path="*" element={<PageNotFound />} />
               </Routes>
             </Layout>
