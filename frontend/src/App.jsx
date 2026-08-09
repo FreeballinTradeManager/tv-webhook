@@ -28,6 +28,8 @@ import PublicStats from './pages/PublicStats'
 import TradeShare from './pages/TradeShare'
 import PropFirmOnboarding from './pages/PropFirmOnboarding'
 import ConnectPMT from './pages/ConnectPMT'
+import AssetRegistry from './pages/AssetRegistry'
+import TradingSchedule from './pages/TradingSchedule'
 import DailyJournal from './pages/DailyJournal'
 import SignIn, { isAuthed } from './pages/SignIn'
 
@@ -108,6 +110,10 @@ export default function App() {
                 <Route path="/Journal" element={<DailyJournal />} />
                 <Route path="/ConnectPMT" element={<ConnectPMT />} />
                 <Route path="/Connect"    element={<ConnectPMT />} />
+                <Route path="/AssetRegistry"    element={<AssetRegistry />} />
+                <Route path="/Assets"           element={<AssetRegistry />} />
+                <Route path="/TradingSchedule"  element={<TradingSchedule />} />
+                <Route path="/Schedule"         element={<TradingSchedule />} />
                 <Route path="*" element={<PageNotFound />} />
               </Routes>
             </Layout>

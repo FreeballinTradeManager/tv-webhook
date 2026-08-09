@@ -7,6 +7,7 @@ import { api } from "@/lib/api";
 import { Terminal, RefreshCw, Search, Filter, AlertTriangle, CheckCircle2, RotateCw, Skull } from "lucide-react";
 import { classifySignal, parseStrategyName, detectPineVersion } from "@/lib/pine_signals";
 import { loadAudit, clearAudit } from "@/lib/audit_log";
+import CopyAuditLedger from "@/components/CopyAuditLedger";
 
 // Task #139 + #59 — Server logs viewer + copy trade audit ledger.
 // Reads recent webhook_signals rows from the backend. Each row is a
@@ -131,6 +132,8 @@ export default function LogsPage() {
         )}
 
         <RetryQueueSection/>
+
+        <CopyAuditLedger/>
 
         <AuditLogPanel/>
 
