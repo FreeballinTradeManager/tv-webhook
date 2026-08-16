@@ -1,8 +1,9 @@
-import React from "react";
+import React, { useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { TrendingUp, TrendingDown, Clock } from "lucide-react";
+import { TrendingUp, TrendingDown, Clock, ChevronRight, ChevronDown } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
+import BracketPnLBreakdown from "@/components/BracketPnLBreakdown";
 
 // Bracket rows for a CLOSED trade with hit status inferred from exit_price.
 function bracketRows(trade) {
@@ -39,7 +40,23 @@ function BracketChip({ row }) {
   );
 }
 
+// Trade can be expanded to show per-leg P&L breakdown. Only trades with
+// at least entry + exit + qty are worth expanding.
+function isBreakdownWorthy(t) {
+  const hasEntry = t.entry_price != null;
+  const hasExit  = t.exit_price != null || t.avg_fill_price != null;
+  const hasQty   = (t.quantity ?? t.qty ?? 0) > 0;
+  return hasEntry && hasExit && hasQty;
+}
+
 export default function RecentTrades({ trades, loading }) {
+  const [expanded, setExpanded] = useState(() => new Set());
+  const toggle = (id) => setExpanded(prev => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+
   return (
     <Card className="bg-slate-900 border-slate-800">
       <CardHeader className="border-b border-slate-800">
@@ -56,6 +73,7 @@ export default function RecentTrades({ trades, loading }) {
           <table className="w-full">
             <thead className="bg-slate-800/50">
               <tr className="text-left text-xs text-slate-400 uppercase tracking-wider">
+                <th className="px-2 py-3 w-6"></th>
                 <th className="px-4 py-3">Symbol</th>
                 <th className="px-4 py-3">Side</th>
                 <th className="px-4 py-3">Brackets (SL · E · TP1 · TP2 · TP3)</th>
@@ -67,6 +85,7 @@ export default function RecentTrades({ trades, loading }) {
               {loading ? (
                 Array(5).fill(0).map((_, i) => (
                   <tr key={i}>
+                    <td className="px-2 py-4"></td>
                     <td className="px-4 py-4"><Skeleton className="h-4 w-20 bg-slate-800" /></td>
                     <td className="px-4 py-4"><Skeleton className="h-4 w-16 bg-slate-800" /></td>
                     <td className="px-4 py-4"><Skeleton className="h-4 w-64 bg-slate-800" /></td>
@@ -76,7 +95,7 @@ export default function RecentTrades({ trades, loading }) {
                 ))
               ) : trades.length === 0 ? (
                 <tr>
-                  <td colSpan={5} className="px-6 py-8 text-center text-slate-400">
+                  <td colSpan={6} className="px-6 py-8 text-center text-slate-400">
                     No trades yet. Start logging your trades!
                   </td>
                 </tr>
@@ -84,43 +103,60 @@ export default function RecentTrades({ trades, loading }) {
                 trades.map((trade) => {
                   const isLong = (trade.direction || trade.side || "").toLowerCase() === "long";
                   const rows = bracketRows(trade);
+                  const canExpand = isBreakdownWorthy(trade);
+                  const isOpen = expanded.has(trade.id);
                   return (
-                    <tr key={trade.id} className="hover:bg-slate-800/50 transition-colors">
-                      <td className="px-4 py-3">
-                        <span className="font-semibold text-white font-mono">{trade.symbol || trade.ticker}</span>
-                      </td>
-                      <td className="px-4 py-3">
-                        <Badge
-                          variant="outline"
-                          className={isLong
-                            ? "bg-green-500/20 text-green-400 border-green-500/50"
-                            : "bg-red-500/20 text-red-400 border-red-500/50"}
-                        >
-                          {isLong
-                            ? <TrendingUp className="w-3 h-3 mr-1" />
-                            : <TrendingDown className="w-3 h-3 mr-1" />}
-                          {isLong ? "LONG" : "SHORT"}
-                        </Badge>
-                      </td>
-                      <td className="px-4 py-3">
-                        {rows.length === 0
-                          ? <span className="text-slate-500 text-xs">—</span>
-                          : <div className="flex items-center gap-1 flex-wrap">
-                              {rows.map((r, i) => <BracketChip key={i} row={r}/>)}
-                            </div>}
-                      </td>
-                      <td className="px-4 py-3 text-right">
-                        <span className={`font-semibold font-mono tabular-nums ${
-                          (trade.profit_loss || 0) > 0 ? "text-green-400"
-                          : (trade.profit_loss || 0) < 0 ? "text-red-400" : "text-slate-400"
-                        }`}>
-                          {(trade.profit_loss || 0) >= 0 ? "+" : "-"}${Math.abs(trade.profit_loss || 0).toFixed(2)}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3">
-                        <span className="text-slate-400 capitalize text-xs">{trade.session || "-"}</span>
-                      </td>
-                    </tr>
+                    <React.Fragment key={trade.id}>
+                      <tr className={`hover:bg-slate-800/50 transition-colors ${canExpand ? "cursor-pointer" : ""}`}
+                          onClick={() => canExpand && toggle(trade.id)}>
+                        <td className="px-2 py-3 text-slate-500">
+                          {canExpand
+                            ? (isOpen ? <ChevronDown className="w-4 h-4"/> : <ChevronRight className="w-4 h-4"/>)
+                            : null}
+                        </td>
+                        <td className="px-4 py-3">
+                          <span className="font-semibold text-white font-mono">{trade.symbol || trade.ticker}</span>
+                        </td>
+                        <td className="px-4 py-3">
+                          <Badge
+                            variant="outline"
+                            className={isLong
+                              ? "bg-green-500/20 text-green-400 border-green-500/50"
+                              : "bg-red-500/20 text-red-400 border-red-500/50"}
+                          >
+                            {isLong
+                              ? <TrendingUp className="w-3 h-3 mr-1" />
+                              : <TrendingDown className="w-3 h-3 mr-1" />}
+                            {isLong ? "LONG" : "SHORT"}
+                          </Badge>
+                        </td>
+                        <td className="px-4 py-3">
+                          {rows.length === 0
+                            ? <span className="text-slate-500 text-xs">—</span>
+                            : <div className="flex items-center gap-1 flex-wrap">
+                                {rows.map((r, i) => <BracketChip key={i} row={r}/>)}
+                              </div>}
+                        </td>
+                        <td className="px-4 py-3 text-right">
+                          <span className={`font-semibold font-mono tabular-nums ${
+                            (trade.profit_loss || 0) > 0 ? "text-green-400"
+                            : (trade.profit_loss || 0) < 0 ? "text-red-400" : "text-slate-400"
+                          }`}>
+                            {(trade.profit_loss || 0) >= 0 ? "+" : "-"}${Math.abs(trade.profit_loss || 0).toFixed(2)}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3">
+                          <span className="text-slate-400 capitalize text-xs">{trade.session || "-"}</span>
+                        </td>
+                      </tr>
+                      {isOpen && (
+                        <tr className="bg-slate-950/40">
+                          <td colSpan={6} className="p-0">
+                            <BracketPnLBreakdown trade={trade}/>
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
                   );
                 })
               )}

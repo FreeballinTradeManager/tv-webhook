@@ -8,6 +8,7 @@ import { DollarSign, Percent, TrendingUp, TrendingDown, Divide, Calendar, Brain,
 import { EMOTION_TAGS, MISTAKE_TAGS, tagMeta, getTags, allUsedTags } from "@/lib/trade_tags";
 import { detectPineVersion, parseStrategyName } from "@/lib/pine_signals";
 import SessionRollup from "@/components/SessionRollup";
+import TimeOfDayHeatmap from "@/components/TimeOfDayHeatmap";
 
 const StatCard = ({ title, value, icon: Icon, color }) => (
   <Card className="bg-slate-900 border-slate-800">
@@ -126,6 +127,9 @@ export default function AnalyticsPage() {
 
         {/* Task #191 — Session performance rollup (R1 Pre-NY / R2 NY / R3 Asia) */}
         <SessionRollup trades={trades} />
+
+        {/* Task #227 — Time-of-day heatmap (7×24 P&L grid, ET-based buckets) */}
+        <TimeOfDayHeatmap trades={trades} />
 
         {/* Task #125 — Per-asset P&L breakdown ("which instrument to focus on") */}
         <PerAssetBreakdown trades={trades} />

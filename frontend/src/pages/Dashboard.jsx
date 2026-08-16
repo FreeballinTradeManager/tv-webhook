@@ -41,6 +41,10 @@ import SessionPerformance from "../components/dashboard/SessionPerformance";
 import AccountOverview from "../components/dashboard/AccountOverview";
 import KillSwitchButton from "../components/KillSwitchButton";
 import SLDriftDetector from "../components/SLDriftDetector";
+import Mt5MirrorHealth from "../components/Mt5MirrorHealth";
+import WeeklyDigestCard from "../components/WeeklyDigestCard";
+import PayoutLockBanner from "../components/PayoutLockBanner";
+import NewsBlackoutTile from "../components/NewsBlackoutTile";
 
 // Rules checklist stores checked state per DAY in localStorage. Auto-resets
 // at midnight (new day, new key, empty set). User can ALSO manually reset
@@ -170,6 +174,14 @@ export default function Dashboard() {
           </div>
         </div>
 
+        {/* Task #221 — Payout Lock banner. Silent unless an enabled account
+            hit today's target or is at ≥75% warn threshold. */}
+        <PayoutLockBanner accounts={accounts} onChange={() => setAccounts([...accounts])}/>
+
+        {/* Task #224 — News blackout tile. Self-hides if no upcoming events
+            in window or user disabled show_tile. */}
+        <NewsBlackoutTile />
+
         {/* Rules checklist — daily commitment. Ticks reset at midnight
             via date-scoped localStorage key. */}
         {(user?.trading_rules?.length > 0) && (
@@ -294,6 +306,12 @@ export default function Dashboard() {
           {trades.some(t => t.status !== "closed" && t.status !== "cancelled") && (
             <SLDriftDetector trades={trades} />
           )}
+          {/* Task #216 — MT5 mirror health tile. Component self-hides when
+              no accounts are configured, so it stays invisible for users
+              who haven't touched the mirror yet. */}
+          <Mt5MirrorHealth />
+          {/* Task #220 — Weekly digest. Self-hides when no closed trades in window. */}
+          <WeeklyDigestCard trades={trades} />
           <RecentTrades trades={trades.slice(0, 10)} loading={loading} />
           <SessionPerformance trades={trades} />
         </div>

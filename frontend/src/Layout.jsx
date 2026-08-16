@@ -59,6 +59,9 @@ const navigationItems = [
 
   // ── JOURNAL ────────────────────────────────────────────────────
   { title: "Trades",          url: createPageUrl("Trades"),          icon: TrendingUp,      group: "Journal" },
+  { title: "Trade Log",       url: createPageUrl("TradeJournal"),    icon: BookOpen,        group: "Journal" },
+  { title: "AI Insights",     url: createPageUrl("AIInsights"),      icon: Sparkles,        group: "Journal" },
+  { title: "What-If",         url: createPageUrl("WhatIf"),          icon: Rewind,          group: "Journal" },
   { title: "Daily Journal",   url: createPageUrl("DailyJournal"),    icon: NotebookPen,     group: "Journal" },
   { title: "Reports",         url: createPageUrl("Reports"),         icon: FileBarChart,    group: "Journal" },
   { title: "Analytics",       url: createPageUrl("Analytics"),       icon: BarChart3,       group: "Journal" },
@@ -81,6 +84,9 @@ const navigationItems = [
   { title: "Asset Registry",  url: createPageUrl("AssetRegistry"),   icon: FileCode,        group: "Tools" },
   { title: "Chart Drawings",  url: createPageUrl("ChartDrawings"),   icon: NotebookPen,     group: "Tools" },
   { title: "Manual Signal",   url: createPageUrl("ManualSignal"),    icon: Zap,             group: "Tools" },
+  { title: "MT5 Mirror",      url: createPageUrl("Mt5Mirror"),       icon: Repeat,          group: "Tools" },
+  { title: "Outgoing Webhooks", url: createPageUrl("Webhooks"),      icon: Bell,            group: "Tools" },
+  { title: "Integrations",    url: createPageUrl("Integrations"),    icon: KeyRound,        group: "Setup" },
 
   // ── SETUP ──────────────────────────────────────────────────────
   { title: "Setup Wizard",    url: createPageUrl("Setup"),           icon: Sparkles,        group: "Setup" },

@@ -1979,25 +1979,56 @@ def enqueue_webhook_retry(db: Session, target_url: str, payload_str: str,
 # in the events feed) but flag matched=false in the response.
 
 def _resolve_observe_account(db: Session, account_key: str):
-    """Look up an Account by id or name. Returns Account or None."""
+    """Look up an Account by internal id, broker-side account_id, or name.
+
+    Match priority (task #228):
+      1. Numeric internal id  — /observe/1
+      2. Broker account_id    — /observe/DEMO4193333, /observe/APEX-12345
+      3. Exact name match     — /observe/Lucid%2050K
+      4. Case-insensitive name match — /observe/lucid 50k
+
+    Returning None means the webhook still gets logged (raw payload preserved)
+    but no Position row bridge fires. The frontend surfaces that with the
+    'matched' field in the response.
+    """
     if not account_key:
         return None
-    # Try id first (numeric or string)
+
+    # 1. Numeric internal id (fast path — /observe/1)
     try:
         acct = db.query(Account).filter(Account.id == int(account_key)).first()
         if acct:
             return acct
     except (ValueError, TypeError):
         pass
-    # Fall back to exact name match
-    return db.query(Account).filter(Account.name == account_key).first()
+
+    # 2. Broker-side account_id (self-documenting URLs like /observe/DEMO4193333)
+    acct = db.query(Account).filter(Account.account_id == account_key).first()
+    if acct:
+        return acct
+
+    # 3. Exact name match (URL-encoded /observe/Lucid%2050K works)
+    acct = db.query(Account).filter(Account.name == account_key).first()
+    if acct:
+        return acct
+
+    # 4. Case-insensitive name fallback (last resort — trader convenience)
+    return db.query(Account).filter(sa_func.lower(Account.name) == account_key.lower()).first()
 
 
 @app.post("/api/webhook/observe/{account_key}")
 async def observe_webhook(account_key: str, request: Request, db: Session = Depends(get_db)):
     """OBSERVE-ONLY sink. Logs the payload, NEVER routes to a broker.
     Called from a second webhook on the user's TradingView alert while
-    the primary webhook stays wired to PMT / TradersPost for execution."""
+    the primary webhook stays wired to PMT / TradersPost for execution.
+
+    Task #230: auto-provisions a demo Account on first hit if the key
+    doesn't match anything yet. Removes the "add account first" friction
+    — trader picks any URL suffix (their Tradovate account #, or "main",
+    or whatever), pastes it into TradingView once, and TradeCore learns
+    it on the first signal. Auto-created accounts land in env=demo so
+    they can NEVER be armed for real routing without an explicit env
+    change. Safe for observe-mode use."""
     if not account_key or len(account_key) < 1:
         raise HTTPException(status_code=400, detail="account_key required")
 
@@ -2006,6 +2037,27 @@ async def observe_webhook(account_key: str, request: Request, db: Session = Depe
     except Exception:
         payload = {}
     raw_body = (await request.body()).decode("utf-8", "ignore") if not payload else json.dumps(payload)
+
+    # Task #230 — auto-create demo Account if this observe key is new.
+    # We do this BEFORE resolving so downstream logging + position bridge
+    # both see the new account_id. Never overwrites an existing account.
+    _acct_probe = _resolve_observe_account(db, account_key)
+    if _acct_probe is None:
+        try:
+            new_acct = Account(
+                name=account_key[:80],
+                broker="observed",                # neutral broker — no execution wiring
+                account_id=account_key[:80],      # store the raw key for round-trip
+                env="demo",                        # cannot arm without env change
+                daily_loss_limit=0.0,
+                active=True,
+                paused=False,
+                config={"auto_created": True, "source": "observe_webhook"},
+            )
+            db.add(new_acct); db.commit(); db.refresh(new_acct)
+        except Exception:
+            db.rollback()   # leave alone — resolver will still return None and endpoint continues
+
 
     # Pull the same fields we extract from other webhook shapes so the
     # events feed reads consistently across observe / demo / direct.
@@ -2208,6 +2260,356 @@ def observe_webhook_clear(account_key: str, db: Session = Depends(get_db)):
     n = db.query(WebhookSignal).filter(WebhookSignal.key == f"observe:{account_key}").delete()
     db.commit()
     return {"cleared": n, "account_key": account_key}
+
+
+# ---------------------------------------------------------------------------
+# MT5 mirror — Phase 2A (task #212)
+# ---------------------------------------------------------------------------
+# STUB endpoints. Phase 2A ships the scaffolding — the endpoints exist so the
+# frontend flow works end-to-end (Enter creds → Test connection → shows state)
+# without any real MetaAPI wiring yet. Phase 2B (task #213) flips the switch
+# by replacing the stub bodies with real httpx calls to api.metaapi.cloud
+# once the user has FTMO DEMO + MetaAPI creds pasted.
+#
+# LOCKED CONSTRAINTS:
+#   · Creds never touch server logs. Body is echoed back MINUS password + token.
+#   · Test never fires an order. Ever. That's Phase 2C behind ARM.
+#   · If MetaApi env vars are missing (they are, in Phase 2A), we return
+#     phase="2A" so the UI shows the setup-guide state instead of a spinner.
+
+class Mt5ConnectIn(BaseModel):
+    """Payload the frontend POSTs when the user pastes MT5 + MetaAPI creds."""
+    account_id: int
+    mt5_login: str
+    mt5_password: str        # accepted but NEVER stored server-side in 2A
+    mt5_server: str
+    platform: str = "MT5"    # "MT5" | "MT4" | "cTrader"
+    broker_label: str = "FTMO"
+    metaapi_token: str = ""  # empty in 2A → phase=2A response
+    metaapi_account_id: str = ""
+
+
+@app.post("/api/mt5/connect")
+def mt5_connect(payload: Mt5ConnectIn):
+    """Phase 2A stub — accepts creds, sanity-checks shape, returns state.
+
+    Returns phase="2A" until MetaAPI env is wired. The frontend uses phase to
+    decide whether to show the setup-guide banner or the live connect state.
+    """
+    missing = []
+    if not payload.mt5_login:    missing.append("mt5_login")
+    if not payload.mt5_password: missing.append("mt5_password")
+    if not payload.mt5_server:   missing.append("mt5_server")
+    if missing:
+        raise HTTPException(status_code=400, detail=f"missing: {', '.join(missing)}")
+
+    has_metaapi = bool(payload.metaapi_token and payload.metaapi_account_id)
+
+    return {
+        "accepted":   True,
+        "phase":      "2B" if has_metaapi else "2A",
+        "account_id": payload.account_id,
+        "platform":   payload.platform,
+        "broker":     payload.broker_label,
+        # Echo shape without secrets so the UI can display what was received
+        "mt5_login":  payload.mt5_login,
+        "mt5_server": payload.mt5_server,
+        "metaapi_account_id": payload.metaapi_account_id or None,
+        "next_step":  (
+            "Paste MetaAPI token + provisioned MT5 account_id to advance to Phase 2B."
+            if not has_metaapi
+            else "Phase 2B — call /api/mt5/test/{account_id} to verify FTMO connectivity."
+        ),
+        # Explicit: no order sent
+        "sent_order": False,
+        "note":       "OBSERVE-STUB. No broker call was made by TradeCore.",
+    }
+
+
+@app.get("/api/mt5/test/{account_id}")
+def mt5_test(account_id: int):
+    """Phase 2A stub — connectivity test that always returns pending.
+
+    Phase 2B replaces the body with a real MetaAPI GET
+    /users/current/accounts/{id} call to fetch broker + balance + margin.
+    """
+    return {
+        "account_id": account_id,
+        "phase":      "2A",
+        "ok":         False,
+        "reason":     "MetaAPI wiring pending — Phase 2B unlocks this once you paste creds.",
+        "sent_order": False,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Integrations catalog stubs (task #219)
+# ---------------------------------------------------------------------------
+# One shape per third-party service. Each POST /api/integrations/{slug}/test
+# echoes back { ok, phase } — phase="2A" until the corresponding Railway env
+# var is set, at which point the endpoint starts making real API calls.
+#
+# The frontend Integrations page walks each user through signup + creds; when
+# they hit Test, we hit this endpoint. No secrets are logged.
+
+INTEGRATION_ENV_MAP = {
+    "anthropic":      "ANTHROPIC_API_KEY",
+    "telegram":       "TELEGRAM_BOT_TOKEN",
+    "twilio":         "TWILIO_ACCOUNT_SID",
+    "smtp":           "SMTP_HOST",
+    "aws_s3":         "AWS_S3_BUCKET",
+    "google_sheets":  "GSHEETS_SERVICE_ACCOUNT",
+    "exchange_rate":  "EXCHANGE_RATE_API_KEY",
+    "databento":      "DATABENTO_API_KEY",
+    "twitter":        "TWITTER_BEARER_TOKEN",
+    "forex_factory":  None,          # no env, no key — scrape on enable
+    "metaapi":        "METAAPI_TOKEN",
+}
+
+
+@app.post("/api/integrations/{slug}/test")
+async def integrations_test(slug: str, request: Request):
+    """Phase 2A test stub for any integration slug. Never fires real calls.
+
+    Backend returns:
+      · phase="2B" only if the corresponding env var is set on Railway
+      · phase="2A" otherwise (waiting on ops to add the env)
+
+    In either phase, this endpoint does NOT actually call the third-party API.
+    Frontend uses phase to decide whether to show "verified" or "pending".
+    """
+    if slug not in INTEGRATION_ENV_MAP:
+        raise HTTPException(status_code=404, detail=f"Unknown integration slug: {slug}")
+
+    env_key = INTEGRATION_ENV_MAP[slug]
+    env_present = env_key is None or bool(os.environ.get(env_key))
+
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+
+    # Sanity: which fields did the user give us? Never echo secrets.
+    field_keys = sorted([k for k in (payload or {}).keys() if not k.startswith("last_")])
+
+    if not env_present:
+        return {
+            "ok":            False,
+            "phase":         "2A",
+            "slug":          slug,
+            "env_present":   False,
+            "env_key":       env_key,
+            "fields_given":  field_keys,
+            "reason":        f"Backend env {env_key} not set — Phase 2B unlocks once ops adds it to Railway.",
+        }
+
+    # Env present. Backend is ready to make real calls — but for now we still
+    # return "ok" without actually hitting the third-party. Real API calls
+    # land per-service when we wire each individual integration.
+    return {
+        "ok":            True,
+        "phase":         "2B",
+        "slug":          slug,
+        "env_present":   True,
+        "env_key":       env_key,
+        "fields_given":  field_keys,
+        "note":          "Env present. Real API wiring lands per-service.",
+    }
+
+
+# ---------------------------------------------------------------------------
+# AI journal insights (task #225 — #79)
+# ---------------------------------------------------------------------------
+# Frontend POSTs recent trades; we ask Claude to spot patterns and mistakes.
+# Phase 2A returns a canned demo response so the UI shape is valid without
+# ANTHROPIC_API_KEY set. Phase 2B swaps in the real anthropic client call.
+#
+# The prompt intentionally focuses on:
+#   · Discipline vs revenge / FOMO patterns
+#   · Session performance disparities
+#   · Symbol-specific edge or bleed
+#   · Rule violations (from trading_rules if supplied)
+#   · One concrete action item for next session
+
+class AIInsightsIn(BaseModel):
+    trades:         list = []            # array of Trade rows
+    window_days:    int  = 7
+    trading_rules:  list[str] | None = None
+    style:          str  = "coaching"    # "coaching" | "critical" | "analytical"
+
+
+@app.post("/api/ai/journal-insights")
+async def ai_journal_insights(payload: AIInsightsIn):
+    """Phase 2A stub — returns computed summary + canned insight until
+    ANTHROPIC_API_KEY is set, then swaps to a real Claude call."""
+
+    trades = payload.trades or []
+    n = len(trades)
+
+    # Compute lightweight summary server-side so even the Phase 2A stub
+    # feels informed. Real Phase 2B call still receives raw trades.
+    def pnl_of(t):
+        for k in ("profit_loss", "pnl", "realized_pnl"):
+            v = t.get(k) if isinstance(t, dict) else None
+            if v is not None:
+                try: return float(v)
+                except (TypeError, ValueError): pass
+        return 0.0
+
+    total_pnl = sum(pnl_of(t) for t in trades)
+    wins   = sum(1 for t in trades if pnl_of(t) > 0)
+    losses = sum(1 for t in trades if pnl_of(t) < 0)
+    win_rate = wins / (wins + losses) if (wins + losses) > 0 else 0.0
+
+    key_present = bool(os.environ.get("ANTHROPIC_API_KEY"))
+
+    if not key_present:
+        # Phase 2A canned insight — informed by the real summary but not from Claude.
+        canned = _phase2a_canned_insight(n, total_pnl, wins, losses, win_rate, payload.window_days)
+        return {
+            "phase":       "2A",
+            "key_present": False,
+            "window_days": payload.window_days,
+            "summary":     {"trades": n, "total_pnl": total_pnl,
+                            "wins": wins, "losses": losses, "win_rate": win_rate},
+            "insight":     canned,
+            "note":        "Phase 2A canned — set ANTHROPIC_API_KEY on Railway to unlock real Claude analysis.",
+        }
+
+    # Phase 2B — real Anthropic call. Kept as a try/except so a broken
+    # network doesn't bring down the whole endpoint; falls back to canned.
+    try:
+        import anthropic  # deferred import — only loaded when key present
+        client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+        prompt = _build_journal_prompt(trades, payload.window_days,
+                                       payload.trading_rules, payload.style)
+        msg = client.messages.create(
+            model="claude-sonnet-5",
+            max_tokens=1200,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        insight_text = msg.content[0].text if msg.content else ""
+        return {
+            "phase":       "2B",
+            "key_present": True,
+            "window_days": payload.window_days,
+            "summary":     {"trades": n, "total_pnl": total_pnl,
+                            "wins": wins, "losses": losses, "win_rate": win_rate},
+            "insight":     insight_text,
+            "model":       "claude-sonnet-5",
+        }
+    except Exception as e:
+        return {
+            "phase":       "2B-error",
+            "key_present": True,
+            "error":       f"{type(e).__name__}: {str(e)[:200]}",
+            "summary":     {"trades": n, "total_pnl": total_pnl,
+                            "wins": wins, "losses": losses, "win_rate": win_rate},
+            "insight":     _phase2a_canned_insight(n, total_pnl, wins, losses, win_rate, payload.window_days),
+            "note":        "Anthropic call failed — showing canned fallback. Check API key + network.",
+        }
+
+
+def _phase2a_canned_insight(n, total, wins, losses, wr, days):
+    if n == 0:
+        return (f"No closed trades in the last {days} days. "
+                "Nothing for Claude to analyze yet — take a few trades and check back.")
+    verdict = ("Solid" if total > 0 and wr >= 0.5 else
+               "Mixed" if total > 0 else
+               "Rough" if total < 0 else "Flat")
+    return (
+        f"**{verdict} {days}d — {n} trades, {wins}W/{losses}L, {wr*100:.0f}% WR, "
+        f"{'+' if total >= 0 else ''}${total:,.0f} net.**\n\n"
+        f"_Phase 2A preview._ Claude's real analysis will pattern-match these trades against "
+        f"your rules and history — spotting things like session bleeds, revenge-tag clusters, "
+        f"consistency-rule risk, and one concrete action for next session.\n\n"
+        f"Paste your Anthropic API key at [/Integrations](/Integrations) → Anthropic (Claude) "
+        f"and once the ANTHROPIC_API_KEY lands on Railway env, this button starts returning "
+        f"real Claude-generated insights."
+    )
+
+
+def _build_journal_prompt(trades, days, rules, style):
+    style_note = {
+        "coaching":   "Encouraging and specific — praise what's working, flag what isn't.",
+        "critical":   "Blunt and precise — don't sugarcoat. Focus on mistakes.",
+        "analytical": "Neutral and statistical — patterns, not judgment.",
+    }.get(style, "Encouraging and specific.")
+
+    # Compact trade rows — keep prompt small
+    def row(t):
+        return {
+            "sym": t.get("symbol") or t.get("ticker"),
+            "side": t.get("direction") or t.get("side"),
+            "qty": t.get("quantity"),
+            "entry": t.get("entry_price"),
+            "stop": t.get("stop_loss"),
+            "tp1": t.get("take_profit_1"),
+            "tp2": t.get("take_profit_2"),
+            "tp3": t.get("take_profit_3"),
+            "exit": t.get("exit_price"),
+            "pnl": t.get("profit_loss") or t.get("pnl"),
+            "session": t.get("session"),
+            "tags": t.get("tags") or [],
+            "entry_time": t.get("entry_time") or t.get("created_date"),
+        }
+    compact = [row(t) for t in trades[:100]]   # cap prompt size
+
+    return f"""You are reviewing a futures/CFD trader's last {days} days.
+Style: {style_note}
+
+{'Trader rules: ' + ' | '.join(rules) if rules else ''}
+
+TRADES ({len(compact)}):
+{json.dumps(compact, indent=2)}
+
+Give me:
+
+1. **Verdict** — one line: what this stretch tells us.
+2. **Top pattern** — the biggest recurring behavior (good or bad).
+3. **Discipline check** — any revenge/FOMO/rule-break signals in the tags?
+4. **Session bleed** — is one session (PRE-NY / NY / ASIA) dragging the rest?
+5. **Symbol edge** — which instrument is working, which isn't?
+6. **One action for next session** — specific, testable, single sentence.
+
+Keep it under 300 words. Markdown formatting. Numbers where possible.
+"""
+
+
+@app.get("/api/integrations/status")
+def integrations_status():
+    """Which integration envs are present on this Railway instance.
+
+    Frontend uses this on load to show a global "3/10 integrations backend-ready"
+    header without POSTing to every /test endpoint.
+    """
+    return {
+        "slugs": {
+            slug: (env is None or bool(os.environ.get(env)))
+            for slug, env in INTEGRATION_ENV_MAP.items()
+        },
+    }
+
+
+@app.get("/api/mt5/setup-status")
+def mt5_setup_status():
+    """Which phase is the MT5 mirror in, globally?
+
+    Reads MetaAPI env vars (absent in 2A). Once METAAPI_TOKEN is set as a
+    Railway env var and this endpoint returns phase=2B, the frontend swaps
+    the setup-guide banner for the live connect flow.
+    """
+    metaapi_token_present = bool(os.environ.get("METAAPI_TOKEN"))
+    return {
+        "phase":                 "2B" if metaapi_token_present else "2A",
+        "metaapi_env_present":   metaapi_token_present,
+        "adapter_ready":         metaapi_token_present,
+        "note":                  (
+            "MetaAPI env wired. Ready to accept per-user MetaAPI account tokens."
+            if metaapi_token_present
+            else "Setup guide showing. Waiting on FTMO DEMO + MetaAPI signup."
+        ),
+    }
 
 
 @app.post("/api/webhook/strategy/{slug}")

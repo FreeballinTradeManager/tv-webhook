@@ -50,6 +50,7 @@ export const AUDIT_EVENTS = {
   ACCOUNT_PAUSE:       "account.pause",
   ACCOUNT_RESUME:      "account.resume",
   ACCOUNT_DELETE:      "account.delete",
+  ACCOUNT_CREATE:      "account.create",
   POSITION_CLOSE:      "position.close",
   GUARDIAN_RESET:      "guardian.reset",
   RULES_CLEAR:         "rules.clear",

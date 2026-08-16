@@ -10,6 +10,10 @@ import { useContextMenu } from "@/components/RightClickMenu";
 import { isObserveMode } from "@/lib/broker_mode";
 import AccountSizingCard from "@/components/AccountSizingCard";
 import AccountSymbolMap from "@/components/AccountSymbolMap";
+import Mt5MirrorCard from "@/components/Mt5MirrorCard";
+import PayoutLockConfigRow from "@/components/PayoutLockConfigRow";
+import { addCfdDemoAccount, listCfdDemoPresets } from "@/lib/quick_add_cfd_demo";
+import { useNavigate } from "react-router-dom";
 import { audit, AUDIT_EVENTS } from "@/lib/audit_log";
 import {
   Dialog,
@@ -580,6 +584,8 @@ function AccountCard({ acc, onEdit, onDelete, onResetGuardian, onTogglePause, on
 
                   <AccountSizingCard account={acc}/>
                   <AccountSymbolMap account={acc}/>
+                  <PayoutLockConfigRow account={acc}/>
+                  <Mt5MirrorCard account={acc}/>
                 </CardContent>
                 <div className="p-4 flex justify-end gap-2 border-t border-slate-800">
                   <Button variant="ghost" size="icon" onClick={onDelete}>
@@ -600,6 +606,31 @@ export default function AccountsPage() {
   const [loading, setLoading] = useState(true);
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [editingAccount, setEditingAccount] = useState(null);
+  const [addingPreset, setAddingPreset] = useState(null);
+  const navigate = useNavigate();
+
+  // Task #218 — quick-add FTMO / FundedNext / The5%ers demo accounts.
+  // One click: creates the Account row, pre-enables MT5 mirror with the
+  // right broker preset + suffix, drops trader on Mt5Mirror page ready to
+  // step through the FTMO setup guide.
+  const quickAddCfdDemo = async (presetKey) => {
+    if (addingPreset) return;
+    setAddingPreset(presetKey);
+    try {
+      const { account, preset } = await addCfdDemoAccount(presetKey);
+      audit(AUDIT_EVENTS.ACCOUNT_CREATE || "account.create",
+            { accountId: account.id, source: "quick_add_cfd_demo", preset: presetKey });
+      await loadAccounts();
+      // Nudge the trader to sign up for the free demo (opens in new tab)
+      if (preset.signup_url) window.open(preset.signup_url, "_blank", "noopener");
+      // Then land them on Mt5Mirror where the setup guide waits
+      navigate("/Mt5Mirror");
+    } catch (e) {
+      alert(`Quick-add ${presetKey} failed: ${e.message || e}`);
+    } finally {
+      setAddingPreset(null);
+    }
+  };
 
   useEffect(() => {
     loadAccounts();
@@ -674,6 +705,18 @@ export default function AccountsPage() {
             <h1 className="text-3xl font-bold text-white">Account Manager</h1>
             <p className="text-slate-400">Manage all your trading accounts in one place.</p>
           </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* Task #218 — quick-add CFD demos. One click per firm. */}
+            {listCfdDemoPresets().map(p => (
+              <Button key={p.key}
+                      onClick={() => quickAddCfdDemo(p.key)}
+                      disabled={!!addingPreset}
+                      className="h-9 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white text-xs"
+                      title={`Create demo account for ${p.broker} + open MT5 mirror setup guide`}>
+                <Plus className="w-3 h-3 mr-1"/>
+                {addingPreset === p.key ? "Adding…" : `+ ${p.broker} demo`}
+              </Button>
+            ))}
           <Dialog open={isFormOpen} onOpenChange={setIsFormOpen}>
             <DialogTrigger asChild>
               <Button onClick={() => setEditingAccount(null)} className="bg-blue-600 hover:bg-blue-700 text-white"><Plus className="w-4 h-4 mr-2" />Add Account</Button>
@@ -689,6 +732,7 @@ export default function AccountsPage() {
               />
             </DialogContent>
           </Dialog>
+          </div>
         </div>
 
         <AddBrokerSection onConnected={loadAccounts} />

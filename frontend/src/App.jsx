@@ -32,6 +32,12 @@ import AssetRegistry from './pages/AssetRegistry'
 import TradingSchedule from './pages/TradingSchedule'
 import ChartDrawings from './pages/ChartDrawings'
 import ManualSignal from './pages/ManualSignal'
+import Mt5Mirror from './pages/Mt5Mirror'
+import Webhooks from './pages/Webhooks'
+import Integrations from './pages/Integrations'
+import TradeJournal from './pages/TradeJournal'
+import AIInsights from './pages/AIInsights'
+import WhatIf from './pages/WhatIf'
 import DailyJournal from './pages/DailyJournal'
 import SignIn, { isAuthed } from './pages/SignIn'
 
@@ -120,6 +126,28 @@ export default function App() {
                 <Route path="/Drawings"         element={<ChartDrawings />} />
                 <Route path="/ManualSignal"     element={<ManualSignal />} />
                 <Route path="/TestSignal"       element={<ManualSignal />} />
+                <Route path="/Mt5Mirror"        element={<Mt5Mirror />} />
+                <Route path="/MT5"              element={<Mt5Mirror />} />
+                <Route path="/Mirror"           element={<Mt5Mirror />} />
+                <Route path="/CFD"              element={<Mt5Mirror />} />
+                <Route path="/Forex"            element={<Mt5Mirror />} />
+                <Route path="/Webhooks"         element={<Webhooks />} />
+                <Route path="/OutgoingWebhooks" element={<Webhooks />} />
+                <Route path="/Notifications"    element={<Webhooks />} />
+                <Route path="/Integrations"     element={<Integrations />} />
+                <Route path="/Connect"          element={<Integrations />} />
+                <Route path="/Services"         element={<Integrations />} />
+                <Route path="/API"              element={<Integrations />} />
+                <Route path="/TradeJournal"     element={<TradeJournal />} />
+                <Route path="/TradeLog"         element={<TradeJournal />} />
+                <Route path="/Log"              element={<TradeJournal />} />
+                <Route path="/AIInsights"       element={<AIInsights />} />
+                <Route path="/AI"               element={<AIInsights />} />
+                <Route path="/Insights"         element={<AIInsights />} />
+                <Route path="/Coach"            element={<AIInsights />} />
+                <Route path="/WhatIf"           element={<WhatIf />} />
+                <Route path="/WhatIfAnalyzer"   element={<WhatIf />} />
+                <Route path="/Counterfactual"   element={<WhatIf />} />
                 <Route path="*" element={<PageNotFound />} />
               </Routes>
             </Layout>
