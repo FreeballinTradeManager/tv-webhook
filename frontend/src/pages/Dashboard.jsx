@@ -45,6 +45,7 @@ import Mt5MirrorHealth from "../components/Mt5MirrorHealth";
 import WeeklyDigestCard from "../components/WeeklyDigestCard";
 import PayoutLockBanner from "../components/PayoutLockBanner";
 import NewsBlackoutTile from "../components/NewsBlackoutTile";
+import OnboardingBanner from "../components/OnboardingBanner";
 
 // Rules checklist stores checked state per DAY in localStorage. Auto-resets
 // at midnight (new day, new key, empty set). User can ALSO manually reset
@@ -153,6 +154,8 @@ export default function Dashboard() {
   return (
     <div className="p-4 md:p-8 bg-slate-950 min-h-screen">
       <div className="max-w-7xl mx-auto space-y-6">
+        {/* Task #231 — Natalia's 5-step onboarding, auto-dismisses when complete */}
+        <OnboardingBanner />
         <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
           <div>
             <h1 className="text-3xl md:text-4xl font-bold text-white mb-2 flex items-center gap-2">

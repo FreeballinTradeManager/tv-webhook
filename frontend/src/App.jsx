@@ -40,6 +40,10 @@ import AIInsights from './pages/AIInsights'
 import WhatIf from './pages/WhatIf'
 import DailyJournal from './pages/DailyJournal'
 import SignIn, { isAuthed } from './pages/SignIn'
+// Task #231 — consolidated tabbed pages (new 5-item nav)
+import Journal from './pages/Journal'
+import Config from './pages/Config'
+import Tools from './pages/Tools'
 
 // Redirect to /SignIn when there's no session. Preserves the path they
 // tried to hit so we can bounce them back after login.
@@ -82,6 +86,10 @@ export default function App() {
               <Routes>
                 <Route path="/" element={<Dashboard />} />
                 <Route path="/Dashboard" element={<Dashboard />} />
+                {/* Task #231 — new 5-item nav destinations */}
+                <Route path="/Journal" element={<Journal />} />
+                <Route path="/Config"  element={<Config />} />
+                <Route path="/Tools"   element={<Tools />} />
                 <Route path="/NewTrade" element={<NewTrade />} />
                 <Route path="/RiskCalculator" element={<RiskCalculator />} />
                 <Route path="/Trades" element={<Trades />} />

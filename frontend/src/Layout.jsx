@@ -5,6 +5,7 @@ import { getSession, setSession } from "@/pages/SignIn";
 import { Account } from "@/entities/all";
 import { fleetHealth } from "@/lib/connection_health";
 import NotifyToaster from "@/components/NotifyToaster";
+import HelpChatFAB from "@/components/HelpChatFAB";
 import {
   LayoutDashboard,
   TrendingUp,
@@ -47,58 +48,34 @@ import {
   SidebarTrigger,
 } from "@/components/ui/sidebar";
 
-// Group tags drive the sidebar sections. Adding a new item just needs a
-// `group` field — no more hard-coded slice() ranges to update.
-const navigationItems = [
-  // ── TRADING ────────────────────────────────────────────────────
-  { title: "Dashboard",       url: createPageUrl("Dashboard"),       icon: LayoutDashboard, group: "Trading" },
-  { title: "Live Positions",  url: createPageUrl("LivePositions"),   icon: Activity,        group: "Trading" },
-  { title: "New Trade",       url: createPageUrl("NewTrade"),        icon: PlusCircle,      group: "Trading" },
-  { title: "Playbook",        url: createPageUrl("Playbook"),        icon: ShieldCheck,     group: "Trading" },
-  { title: "Watchlist",       url: createPageUrl("Watchlist"),       icon: Eye,             group: "Trading" },
-
-  // ── JOURNAL ────────────────────────────────────────────────────
-  { title: "Trades",          url: createPageUrl("Trades"),          icon: TrendingUp,      group: "Journal" },
-  { title: "Trade Log",       url: createPageUrl("TradeJournal"),    icon: BookOpen,        group: "Journal" },
-  { title: "AI Insights",     url: createPageUrl("AIInsights"),      icon: Sparkles,        group: "Journal" },
-  { title: "What-If",         url: createPageUrl("WhatIf"),          icon: Rewind,          group: "Journal" },
-  { title: "Daily Journal",   url: createPageUrl("DailyJournal"),    icon: NotebookPen,     group: "Journal" },
-  { title: "Reports",         url: createPageUrl("Reports"),         icon: FileBarChart,    group: "Journal" },
-  { title: "Analytics",       url: createPageUrl("Analytics"),       icon: BarChart3,       group: "Journal" },
-
-  // ── MANAGE ─────────────────────────────────────────────────────
-  { title: "Accounts",        url: createPageUrl("Accounts"),        icon: Wallet,          group: "Manage" },
-  { title: "Rotation",        url: createPageUrl("Rotation"),        icon: Repeat,          group: "Manage" },
-  { title: "Strategies",      url: createPageUrl("Strategies"),      icon: BookOpen,        group: "Manage" },
-  { title: "Subscriptions",   url: createPageUrl("Subscriptions"),   icon: CreditCard,      group: "Manage" },
-  { title: "Vault",           url: createPageUrl("Vault"),           icon: KeyRound,        group: "Manage" },
-
-  // ── TOOLS ──────────────────────────────────────────────────────
-  { title: "Risk Calculator", url: createPageUrl("RiskCalculator"),  icon: Calculator,      group: "Tools" },
-  { title: "Backtester",      url: createPageUrl("Backtester"),      icon: Rewind,          group: "Tools" },
-  { title: "Alerts",          url: createPageUrl("Alerts"),          icon: Bell,            group: "Tools" },
-  { title: "Alert Templates", url: createPageUrl("AlertTemplates"),  icon: FileCode,        group: "Tools" },
-  { title: "Snippets",        url: createPageUrl("Snippets"),        icon: Code2,           group: "Tools" },
-  { title: "Signal Log",      url: createPageUrl("Logs"),            icon: Terminal,        group: "Tools" },
-  { title: "Trading Schedule",url: createPageUrl("TradingSchedule"), icon: Activity,        group: "Tools" },
-  { title: "Asset Registry",  url: createPageUrl("AssetRegistry"),   icon: FileCode,        group: "Tools" },
-  { title: "Chart Drawings",  url: createPageUrl("ChartDrawings"),   icon: NotebookPen,     group: "Tools" },
-  { title: "Manual Signal",   url: createPageUrl("ManualSignal"),    icon: Zap,             group: "Tools" },
-  { title: "MT5 Mirror",      url: createPageUrl("Mt5Mirror"),       icon: Repeat,          group: "Tools" },
-  { title: "Outgoing Webhooks", url: createPageUrl("Webhooks"),      icon: Bell,            group: "Tools" },
-  { title: "Integrations",    url: createPageUrl("Integrations"),    icon: KeyRound,        group: "Setup" },
-
-  // ── SETUP ──────────────────────────────────────────────────────
-  { title: "Setup Wizard",    url: createPageUrl("Setup"),           icon: Sparkles,        group: "Setup" },
-  { title: "Connect PMT",     url: createPageUrl("ConnectPMT"),      icon: Radio,           group: "Setup" },
-  { title: "Demo Sandbox",    url: createPageUrl("Demo"),            icon: Sparkles,        group: "Setup" },
-  { title: "Settings",        url: createPageUrl("Settings"),        icon: Settings,        group: "Setup" },
+// Task #231 — nav consolidation. Down from 32 items across 6 groups to
+// 5 primary items + a user menu. Old URLs still work: the new consolidated
+// pages (Journal, Config, Tools) render the old page components as tabs,
+// so /Trades, /Accounts, etc. keep responding. Anything not surfaced here
+// remains reachable by direct URL (ManualSignal, Logs, Demo, ConnectPMT,
+// PropFirmOnboarding, TradeShare, ChartDrawings) — kept for links but off
+// the main nav so the sidebar stays scannable.
+const primaryNav = [
+  { title: "Dashboard", url: createPageUrl("Dashboard"), icon: LayoutDashboard,
+    hint: "Live view + today's P&L" },
+  { title: "Journal",   url: createPageUrl("Journal"),   icon: BookOpen,
+    hint: "Trades · Log · Daily notes · AI insights · What-if" },
+  { title: "Analytics", url: createPageUrl("Analytics"), icon: BarChart3,
+    hint: "Reports · Sessions · Sharing" },
+  { title: "Config",    url: createPageUrl("Config"),    icon: Wallet,
+    hint: "Accounts · Strategies · Rotation · MT5 · Integrations" },
+  { title: "Tools",     url: createPageUrl("Tools"),     icon: Zap,
+    hint: "Risk calc · Backtester · Alerts · Manual fire" },
 ];
-// Fixed section order so the sidebar layout is deterministic.
-const NAV_GROUP_ORDER = ["Trading", "Journal", "Manage", "Tools", "Setup"];
-const navGroups = NAV_GROUP_ORDER
-  .map(g => ({ label: g, items: navigationItems.filter(i => i.group === g) }))
-  .filter(g => g.items.length > 0);
+
+// User menu — lives in the sidebar footer next to Sign Out. These are
+// per-user config items nobody clicks daily, so they don't earn primary
+// nav space.
+const userMenuNav = [
+  { title: "Settings",      url: createPageUrl("Settings"),      icon: Settings },
+  { title: "Vault",         url: createPageUrl("Vault"),         icon: KeyRound },
+  { title: "Subscriptions", url: createPageUrl("Subscriptions"), icon: CreditCard },
+];
 
 export default function Layout({ children }) {
   const location = useLocation();
@@ -200,35 +177,75 @@ export default function Layout({ children }) {
             </div>
           </SidebarHeader>
 
+          {/* PC-app style — 5 primary items, big + bold, hint text under.
+              No section headings needed with only 5 items. Active state is
+              a solid blue pill, not a subtle stripe. */}
           <SidebarContent className="p-3">
-            {navGroups.map((g, gi) => (
-              <SidebarGroup key={g.label}>
-                <SidebarGroupLabel className={`text-xs font-semibold text-slate-500 uppercase tracking-wider px-3 py-2 ${gi > 0 ? "mt-4" : ""}`}>
-                  {g.label}
-                </SidebarGroupLabel>
-                <SidebarGroupContent>
-                  <SidebarMenu>
-                    {g.items.map((item) => (
+            <SidebarGroup>
+              <SidebarGroupContent>
+                <SidebarMenu>
+                  {primaryNav.map((item) => {
+                    const active = location.pathname === item.url
+                      || (item.url !== "/Dashboard" && location.pathname.startsWith(item.url + "?"))
+                      || (item.url !== "/Dashboard" && location.pathname === item.url + "/");
+                    return (
                       <SidebarMenuItem key={item.title}>
                         <SidebarMenuButton
                           asChild
-                          className={`hover:bg-slate-800 transition-all duration-200 rounded-lg mb-1 ${
-                            location.pathname === item.url
-                              ? 'bg-blue-500/20 text-blue-400 border-l-2 border-blue-500'
-                              : 'text-slate-300'
+                          className={`transition-all duration-150 rounded-xl mb-2 h-auto py-3 ${
+                            active
+                              ? 'bg-blue-600 !text-white hover:bg-blue-600 shadow-md'
+                              : 'text-slate-300 hover:bg-slate-800'
                           }`}
                         >
-                          <Link to={item.url} className="flex items-center gap-3 px-3 py-2.5">
-                            <item.icon className="w-4 h-4" />
-                            <span className="font-medium">{item.title}</span>
+                          <Link to={item.url} className="flex items-start gap-3 px-4">
+                            <item.icon className={`w-6 h-6 mt-0.5 ${active ? 'text-white' : 'text-blue-400'}`} />
+                            <span className="flex flex-col leading-tight">
+                              <span className={`font-bold text-base ${active ? 'text-white' : ''}`}>{item.title}</span>
+                              <span className={`text-[11px] mt-0.5 ${active ? 'text-blue-100' : 'text-slate-500'}`}>{item.hint}</span>
+                            </span>
                           </Link>
                         </SidebarMenuButton>
                       </SidebarMenuItem>
-                    ))}
-                  </SidebarMenu>
-                </SidebarGroupContent>
-              </SidebarGroup>
-            ))}
+                    );
+                  })}
+                </SidebarMenu>
+              </SidebarGroupContent>
+            </SidebarGroup>
+
+            {/* Divider before user menu — visually separates "what I do"
+                from "how the app is set up for me". */}
+            <div className="border-t border-slate-800 my-3 mx-2" />
+
+            <SidebarGroup>
+              <SidebarGroupLabel className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider px-3 py-1">
+                Account
+              </SidebarGroupLabel>
+              <SidebarGroupContent>
+                <SidebarMenu>
+                  {userMenuNav.map((item) => {
+                    const active = location.pathname === item.url;
+                    return (
+                      <SidebarMenuItem key={item.title}>
+                        <SidebarMenuButton
+                          asChild
+                          className={`transition-all duration-150 rounded-lg mb-1 ${
+                            active
+                              ? 'bg-slate-700 text-white'
+                              : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'
+                          }`}
+                        >
+                          <Link to={item.url} className="flex items-center gap-3 px-3 py-2">
+                            <item.icon className="w-4 h-4" />
+                            <span className="font-medium text-sm">{item.title}</span>
+                          </Link>
+                        </SidebarMenuButton>
+                      </SidebarMenuItem>
+                    );
+                  })}
+                </SidebarMenu>
+              </SidebarGroupContent>
+            </SidebarGroup>
           </SidebarContent>
 
           <SidebarFooter className="border-t border-slate-800 p-4 space-y-3">
@@ -282,6 +299,8 @@ export default function Layout({ children }) {
           </div>
         </main>
         <NotifyToaster />
+        {/* Task #231 — floating help chat available on every page */}
+        <HelpChatFAB />
       </div>
     </SidebarProvider>
   );
